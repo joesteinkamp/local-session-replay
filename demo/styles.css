@@ -1,0 +1,15 @@
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif; color: #1c2430; background: #f5f7fa; }
+header { background: #10233f; color: #fff; padding: 14px 24px; display: flex; gap: 24px; align-items: center; }
+header a { color: #c9dcff; }
+main { max-width: 960px; margin: 24px auto; padding: 0 24px; }
+.toolbar { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 16px; }
+label { display: grid; gap: 4px; font-size: 13px; color: #475467; }
+input, select, button { font: inherit; padding: 6px 10px; border: 1px solid #b8c2d0; border-radius: 6px; background: #fff; }
+button { cursor: pointer; background: #1f5eff; border-color: #1f5eff; color: #fff; }
+button.secondary { background: #fff; color: #1f5eff; }
+table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e4e8ee; }
+th { background: #eef2f7; font-size: 13px; }
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #10233f; color: #fff; padding: 10px 16px; border-radius: 8px; }
+.card { background: #fff; border-radius: 8px; padding: 20px; }

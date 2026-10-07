@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="testkit:commit" content="demo">
+  <title>Company · Grid filters prototype</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="../v1/testkit.js"></script>
+  <script src="testkit-config.js"></script>
+</head>
+<body>
+  <header><strong>Prototype</strong><a href="index.html">Companies</a><a href="about.html">About</a></header>
+  <main>
+    <div class="card">
+      <h1 id="name"></h1>
+      <p>Profile page. Use your browser's back button or the link below to return.</p>
+      <button id="follow" type="button">Follow company</button>
+      <button id="broken" type="button" class="secondary">Load filings</button>
+      <p><a href="index.html">← Back to companies</a></p>
+    </div>
+  </main>
+  <script>
+    document.getElementById('name').textContent = new URLSearchParams(location.search).get('name') || 'Unknown company';
+    document.getElementById('follow').addEventListener('click', (e) => { e.target.textContent = 'Following'; });
+    // Intentionally broken so the error log has something to show.
+    document.getElementById('broken').addEventListener('click', () => { window.loadFilings(); });
+  </script>
+</body>
+</html>

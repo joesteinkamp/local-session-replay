@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="testkit:commit" content="demo">
+  <title>Companies · Grid filters prototype</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="../v1/testkit.js"></script>
+  <script src="testkit-config.js"></script>
+</head>
+<body>
+  <header><strong>Prototype</strong><a href="index.html">Companies</a><a href="about.html">About</a></header>
+  <main>
+    <h1>Companies</h1>
+    <div class="toolbar">
+      <label>Search <input id="search" name="search" type="search" placeholder="Company name"></label>
+      <label>Sector
+        <select id="sector" name="sector">
+          <option value="">All sectors</option>
+          <option>Healthcare</option><option>Technology</option><option>Energy</option>
+        </select>
+      </label>
+      <button id="apply" type="button">Apply</button>
+      <button id="export" type="button" class="secondary">Export view</button>
+    </div>
+    <table>
+      <thead><tr><th>Company</th><th>Sector</th><th>Market cap</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </main>
+  <script>
+    const companies = [
+      ['Meridian Health', 'Healthcare', '$12.4B'], ['Northwind Labs', 'Technology', '$3.1B'],
+      ['Solace Energy', 'Energy', '$8.7B'], ['Cobalt Therapeutics', 'Healthcare', '$1.9B'],
+      ['Arcwise', 'Technology', '$22.0B'], ['Helio Grid', 'Energy', '$4.4B'],
+    ];
+    const rows = document.getElementById('rows');
+    function render() {
+      const q = document.getElementById('search').value.toLowerCase();
+      const s = document.getElementById('sector').value;
+      rows.innerHTML = companies
+        .filter(([n, sec]) => (!s || sec === s) && n.toLowerCase().includes(q))
+        .map(([n, sec, cap]) => `<tr><td><a href="company.html?name=${encodeURIComponent(n)}">${n}</a></td><td>${sec}</td><td>${cap}</td></tr>`)
+        .join('');
+    }
+    document.getElementById('apply').addEventListener('click', render);
+    document.getElementById('export').addEventListener('click', () => {
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.textContent = 'Export started — check your downloads';
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 2500);
+    });
+    render();
+  </script>
+</body>
+</html>
