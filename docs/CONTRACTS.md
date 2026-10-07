@@ -59,6 +59,10 @@ DB `testkit`, version 1. Object stores:
 The loader reads it synchronously to stay active across navigation without `?test=1`.
 `localStorage['testkit:last']` = id of the most recent *stopped* session that hasn't
 been discarded, so a reload (with `?test=1`) can still export it.
+`localStorage['testkit:mirror']` = `{ id, rev, fields }`: a synchronous copy of the
+session's phase/task/pause/mute fields, written on every controller update.
+IndexedDB writes still in flight at unload are aborted, so when restoring, the
+controller applies the mirror if its `rev` is newer than `SessionRecord.rev`.
 
 ```js
 SessionRecord = {
@@ -75,6 +79,7 @@ SessionRecord = {
   pausedAt|null,                   // start of the current pause
   taskStartedAt|null,              // current task start, shifted forward by pauses
   tasksCompleted,                  // tasks ended via nextTask()
+  rev,                             // bumped on every controller update (see testkit:mirror)
 }
 ```
 `phase: 'preflight'` is never persisted — preflight is in-memory only.

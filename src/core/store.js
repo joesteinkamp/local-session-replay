@@ -11,6 +11,7 @@ const DB_NAME = 'testkit';
 const DB_VERSION = 1;
 const ACTIVE_KEY = 'testkit:active';
 const LAST_KEY = 'testkit:last';
+const MIRROR_KEY = 'testkit:mirror';
 const FLUSH_MS = 2000;
 const MAX_PENDING_EVENTS = 500;
 const MAX_ATTEMPTS = 3;
@@ -374,6 +375,17 @@ function lsSet(key, value) {
     // Storage disabled: the session still works within this page.
   }
 }
+
+// Synchronous copy of a session's critical fields (see persist() in session.js).
+export function getSessionMirror() {
+  try {
+    return JSON.parse(lsGet(MIRROR_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+export const setSessionMirror = (mirror) => lsSet(MIRROR_KEY, JSON.stringify(mirror));
+export const clearSessionMirror = () => lsSet(MIRROR_KEY, null);
 
 export const getActiveSessionId = () => lsGet(ACTIVE_KEY);
 export const setActiveSessionId = (id) => lsSet(ACTIVE_KEY, id);

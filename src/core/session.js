@@ -136,9 +136,28 @@ export async function createController({ config, store }) {
   // -------------------------------------------------------------------------
   // Persistence helpers
 
+  // Fields that must survive an immediate navigation. An IndexedDB write still
+  // in flight at unload is aborted, so each persist also mirrors these to
+  // localStorage synchronously; restores apply the mirror when its rev is newer.
+  const MIRRORED = ['phase', 'taskIndex', 'taskStartedAt', 'tasksCompleted', 'pausedMs', 'pausedAt', 'muted', 'endedAt', 'audio'];
+
+  function mirrorFields(rec) {
+    const fields = {};
+    for (const key of MIRRORED) if (key in rec) fields[key] = rec[key];
+    return fields;
+  }
+
   function persist(patch) {
+    session.rev = (session.rev || 0) + 1;
     Object.assign(session, patch);
-    return store.updateSession(session.id, patch).catch(reportError);
+    store.setSessionMirror?.({ id: session.id, rev: session.rev, fields: mirrorFields(session) });
+    return store.updateSession(session.id, { ...patch, rev: session.rev }).catch(reportError);
+  }
+
+  function withMirror(rec) {
+    const mirror = store.getSessionMirror?.();
+    if (!rec || mirror?.id !== rec.id || !(mirror.rev > (rec.rev || 0))) return rec;
+    return { ...rec, ...mirror.fields, rev: mirror.rev };
   }
 
   const currentTask = () => (session && session.taskIndex >= 0 ? session.tasks[session.taskIndex] || null : null);
@@ -299,7 +318,8 @@ export async function createController({ config, store }) {
     session = rec;
     segmentId = newId();
     const segments = [...(rec.segments || []), { segmentId, url: location.href, startedAt: Date.now() }];
-    await persist({ segments });
+    // Also rewrites the mirrored fields so a mirror-reconciled record lands in IndexedDB.
+    await persist({ ...mirrorFields(rec), segments });
     attachCapture();
     state = stateFromSession(rec.phase);
     if (rec.phase === 'recording') {
@@ -319,14 +339,14 @@ export async function createController({ config, store }) {
   async function bootFromStore() {
     const activeId = store.getActiveSessionId?.();
     if (activeId) {
-      const rec = await store.getSession(activeId).catch(() => null);
+      const rec = withMirror(await store.getSession(activeId).catch(() => null));
       if (rec && (rec.phase === 'recording' || rec.phase === 'paused')) return resumeSession(rec);
       store.clearActiveSessionId?.();
     }
     // A stopped-but-not-discarded session stays exportable across reloads.
     const lastId = store.getLastSessionId?.();
     if (lastId) {
-      const rec = await store.getSession(lastId).catch(() => null);
+      const rec = withMirror(await store.getSession(lastId).catch(() => null));
       if (rec?.phase === 'stopped') {
         session = rec;
         state = stateFromSession('stopped');
@@ -363,7 +383,7 @@ export async function createController({ config, store }) {
     queue(async () => {
       const id = session?.id;
       if (!id) return;
-      const rec = await store.getSession(id).catch(() => null);
+      const rec = withMirror(await store.getSession(id).catch(() => null));
       stopCapture();
       if (rec && (rec.phase === 'recording' || rec.phase === 'paused')) {
         await resumeSession(rec);
@@ -598,6 +618,7 @@ export async function createController({ config, store }) {
           await store.deleteSession(id);
           if (store.getActiveSessionId?.() === id) store.clearActiveSessionId?.();
           if (store.getLastSessionId?.() === id) store.clearLastSessionId?.();
+          if (store.getSessionMirror?.()?.id === id) store.clearSessionMirror?.();
         }
         set(idleState());
       });

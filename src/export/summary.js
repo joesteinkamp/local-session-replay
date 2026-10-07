@@ -65,9 +65,9 @@ function quote(text, max = 80) {
   return `"${cut.replace(/"/g, '\\"')}"`;
 }
 
+// gapMs is null when the mic could not be re-acquired (length unknown).
 function gapMsOf(entry) {
-  const v = entry.gapMs ?? entry.durationMs ?? entry.value;
-  return Number.isFinite(Number(v)) && v !== '' && v !== null ? Number(v) : null;
+  return Number.isFinite(entry.gapMs) ? entry.gapMs : null;
 }
 
 // ---------- spans ----------
