@@ -11,6 +11,7 @@ const BLOCK_CLASS = 'testkit-block';
 const INPUT_DEBOUNCE_MS = 500;
 const MAX_VALUE = 200;
 const MAX_MESSAGE = 500;
+const MAX_CONSOLE = 200;
 const MAX_STACK = 2000;
 const ERROR_DEDUPE_MS = 2000;
 const TOGGLE_TYPES = new Set(['checkbox', 'radio']);
@@ -123,7 +124,7 @@ function installConsoleHook() {
  * @param {() => string|null} opts.getTaskId
  * @param {(entry) => void} opts.onEntry   receives every LogEntry
  */
-export function createInteractionLog({ mask = true, getTaskId = () => null, onEntry }) {
+export function createInteractionLog({ mask = true, getTaskId = () => null, onEntry, onNavigationIntent = () => {} }) {
   let active = false;
   let currentUrl = typeof location !== 'undefined' ? location.href : '';
   // element → { timer, fields }. Fields (ts, url, taskId, masked value) are
@@ -198,6 +199,8 @@ export function createInteractionLog({ mask = true, getTaskId = () => null, onEn
         x: Math.round(e.clientX || 0),
         y: Math.round(e.clientY || 0),
       });
+      // A link click may unload the page before the next scheduled flush.
+      if (el.closest?.('a[href]')) safe(onNavigationIntent);
     },
     input(e) {
       if (fromOverlay(e)) return;
@@ -222,6 +225,7 @@ export function createInteractionLog({ mask = true, getTaskId = () => null, onEn
       if (fromOverlay(e)) return;
       const form = realTarget(e);
       log('submit', { selector: selectorFor(form), text: labelFor(e.submitter || form, { mask }) });
+      safe(onNavigationIntent);
     },
     popstate() {
       // Following a hash link fires popstate then hashchange; hold popstate a
@@ -288,11 +292,17 @@ export function createInteractionLog({ mask = true, getTaskId = () => null, onEn
       if (!active) return;
       const first = args[0];
       if (typeof first === 'string' && first.startsWith('[TestKit]')) return;
-      const err = args.find((a) => a instanceof Error);
+      // Only the first argument, clipped: prototypes often log whole form
+      // state objects, which would bypass input masking.
+      let message;
+      if (first instanceof Error) message = first.message;
+      else if (typeof first === 'string') message = first;
+      else if (first && typeof first === 'object') message = `[${first.constructor?.name || 'object'}]`;
+      else message = String(first);
       logError({
         source: 'console',
-        message: clip(args.map(stringifyArg).join(' '), MAX_MESSAGE),
-        stack: err?.stack ? String(err.stack).slice(0, MAX_STACK) : undefined,
+        message: clip(message || 'console.error', MAX_CONSOLE),
+        stack: first instanceof Error && first.stack ? String(first.stack).slice(0, MAX_STACK) : undefined,
       });
     };
     if (pageLoad) logNav('load', safe(() => document.referrer) || null, location.href);

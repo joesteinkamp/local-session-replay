@@ -47,6 +47,25 @@ export function micErrorStatus(err) {
   return { status: 'error', error: err?.message || 'Microphone unavailable' };
 }
 
+/**
+ * Like micErrorStatus, but tells a dismissed prompt (Chrome reports X/Esc as
+ * NotAllowedError too) from a real denial via the Permissions API.
+ * `persistent` is true only when the permission is known to be 'denied';
+ * anything else is worth retrying on the next page.
+ */
+export async function classifyMicError(err) {
+  const base = micErrorStatus(err);
+  if (base.status !== 'denied') return { ...base, persistent: false };
+  try {
+    const { state } = await navigator.permissions.query({ name: 'microphone' });
+    if (state === 'denied') return { ...base, persistent: true };
+    if (state === 'prompt') return { status: 'denied', error: 'Microphone prompt was dismissed', persistent: false };
+  } catch {
+    // Permissions API without 'microphone' (Firefox): can't tell, so don't give up for good.
+  }
+  return { ...base, persistent: false };
+}
+
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

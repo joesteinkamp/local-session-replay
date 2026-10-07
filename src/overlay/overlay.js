@@ -252,6 +252,9 @@ function mount(controller) {
       ui.followUpFor = null;
       open = true;
       announce('Recording is active in another tab. Close this tab to continue in the other one.');
+    } else if (wasLocked && !otherTab() && ACTIVE.has(next.phase)) {
+      // This tab took over after the owner tab closed.
+      announce(`Recording continues in this tab. ${taskAnnouncement()}`);
     }
     render();
   }

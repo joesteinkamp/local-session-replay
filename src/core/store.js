@@ -14,6 +14,7 @@ const DB_VERSION = 1;
 const ACTIVE_KEY = 'testkit:active:';
 const LAST_KEY = 'testkit:last:';
 const MIRROR_KEY = 'testkit:mirror:';
+const SPILL_KEY = 'testkit:spill:'; // sessionStorage
 const FLUSH_MS = 2000;
 const MAX_PENDING_EVENTS = 500;
 const MAX_ATTEMPTS = 3;
@@ -27,7 +28,7 @@ let pendingEvents = []; // [{ sessionId, segmentId, event }]
 let pendingLog = []; // [LogEntry & { sessionId }]
 let pendingWaiter = null; // { promise, resolve } shared by every append in the batch
 let flushTimer = null;
-const inflight = new Set(); // settle promises of batches still writing or awaiting a retry
+const inflight = new Set(); // batches still writing or awaiting a retry
 const tombstones = new Set(); // deleted session ids: their retries must not resurrect rows
 const errorListeners = new Set();
 
@@ -126,7 +127,14 @@ function notifyError(err) {
 function installLifecycle() {
   if (lifecycleInstalled || typeof window === 'undefined') return;
   lifecycleInstalled = true;
-  window.addEventListener('pagehide', () => flush(), { capture: true });
+  window.addEventListener(
+    'pagehide',
+    () => {
+      flush();
+      spill();
+    },
+    { capture: true },
+  );
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flush();
   });
@@ -201,43 +209,59 @@ export function flush() {
   clearTimeout(flushTimer);
   flushTimer = null;
   if (pendingEvents.length || pendingLog.length) {
-    if (!db) return ready().then(flush, (err) => notifyError(err));
-    let settle;
-    const batch = { events: pendingEvents, log: pendingLog, waiter: pendingWaiter, attempts: 0 };
-    batch.settled = new Promise((r) => (settle = r));
-    batch.settle = settle;
-    pendingEvents = [];
-    pendingLog = [];
-    pendingWaiter = null;
-    inflight.add(batch.settled);
-    writeBatch(batch);
+    const batch = createBatch();
+    if (db) writeBatch(batch);
+    else ready().then(() => writeBatch(batch), (err) => finishBatch(batch, err));
   }
-  return Promise.all(inflight).then(() => {});
+  return Promise.all([...inflight].map((b) => b.settled)).then(() => {});
+}
+
+// Rows get deterministic string keys (`<batchId>:e<n>` / `:l<n>`) fixed when
+// the batch is cut, so the same rows written twice — by a pagehide
+// transaction that did commit and by a later spill import — collapse into one.
+function createBatch() {
+  const batchId = newBatchId();
+  const events = chunkEvents(pendingEvents).map((chunk, i) => ({ ...chunk, id: `${batchId}:e${i}` }));
+  const log = pendingLog.map((entry, i) => ({ ...entry, id: `${batchId}:l${i}` }));
+  let settle;
+  const batch = { events, log, waiter: pendingWaiter, attempts: 0 };
+  batch.settled = new Promise((r) => (settle = r));
+  batch.settle = settle;
+  pendingEvents = [];
+  pendingLog = [];
+  pendingWaiter = null;
+  inflight.add(batch);
+  return batch;
+}
+
+function newBatchId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function finishBatch(batch, err) {
+  if (err) notifyError(err);
+  batch.waiter?.resolve();
+  inflight.delete(batch);
+  batch.settle();
 }
 
 function writeBatch(batch) {
-  const done = () => {
-    batch.waiter?.resolve();
-    inflight.delete(batch.settled);
-    batch.settle();
-  };
-  batch.events = batch.events.filter((p) => !tombstones.has(p.sessionId));
-  batch.log = batch.log.filter((e) => !tombstones.has(e.sessionId));
+  batch.events = batch.events.filter((row) => !tombstones.has(row.sessionId));
+  batch.log = batch.log.filter((row) => !tombstones.has(row.sessionId));
   if (!batch.events.length && !batch.log.length) {
-    done();
+    finishBatch(batch);
     return;
   }
   const retry = (err) => {
     batch.attempts += 1;
     if (batch.attempts >= MAX_ATTEMPTS || !db) {
-      notifyError(err);
-      done();
+      finishBatch(batch, err);
       return;
     }
     // A non-cloneable value would fail forever; JSON-normalize it once.
     if (err?.name === 'DataCloneError') {
-      batch.events = batch.events.map((p) => ({ ...p, event: JSON.parse(JSON.stringify(p.event)) }));
-      batch.log = batch.log.map((e) => JSON.parse(JSON.stringify(e)));
+      batch.events = batch.events.map((row) => JSON.parse(JSON.stringify(row)));
+      batch.log = batch.log.map((row) => JSON.parse(JSON.stringify(row)));
     }
     setTimeout(() => writeBatch(batch), 250 * batch.attempts);
   };
@@ -245,9 +269,9 @@ function writeBatch(batch) {
   try {
     tx = db.transaction(['events', 'log'], 'readwrite');
     const events = tx.objectStore('events');
-    for (const chunk of chunkEvents(batch.events)) events.add(chunk);
+    for (const row of batch.events) events.put(row);
     const log = tx.objectStore('log');
-    for (const entry of batch.log) log.add(entry);
+    for (const row of batch.log) log.put(row);
   } catch (err) {
     try {
       tx?.abort();
@@ -257,10 +281,102 @@ function writeBatch(batch) {
     retry(err);
     return;
   }
-  tx.oncomplete = done;
+  tx.oncomplete = () => finishBatch(batch);
   tx.onabort = () => retry(tx.error || new Error('IndexedDB transaction aborted'));
   // Ask the engine to commit now rather than when the task ends — helps on unload.
   tx.commit?.();
+}
+
+// ---------------------------------------------------------------------------
+// Unload spill. A transaction opened in pagehide isn't guaranteed to commit,
+// so the rows of every unfinished batch are also copied synchronously to
+// sessionStorage (per tab, survives same-tab navigation) and re-imported by
+// the next page. Keys make the import idempotent.
+
+function spillKey(sessionId) {
+  return SPILL_KEY + sessionId;
+}
+
+/** Synchronously copies unfinished batches to sessionStorage. Never throws. */
+export function spill() {
+  try {
+    if (pendingEvents.length || pendingLog.length) createBatch();
+    const bySession = new Map();
+    for (const batch of inflight) {
+      for (const [kind, rows] of [['events', batch.events], ['log', batch.log]]) {
+        for (const row of rows) {
+          if (tombstones.has(row.sessionId)) continue;
+          if (!bySession.has(row.sessionId)) bySession.set(row.sessionId, { events: new Map(), log: new Map() });
+          bySession.get(row.sessionId)[kind].set(row.id, row);
+        }
+      }
+    }
+    for (const [sessionId, rows] of bySession) {
+      const previous = readSpill(sessionId);
+      for (const row of previous?.events || []) if (!rows.events.has(row.id)) rows.events.set(row.id, row);
+      for (const row of previous?.log || []) if (!rows.log.has(row.id)) rows.log.set(row.id, row);
+      const events = [...rows.events.values()];
+      const log = [...rows.log.values()];
+      // A full snapshot can exceed the quota; the log is small and the most
+      // valuable part (it holds the click that caused the navigation).
+      if (!ssSet(spillKey(sessionId), JSON.stringify({ events, log }))) {
+        ssSet(spillKey(sessionId), JSON.stringify({ events: [], log }));
+      }
+    }
+  } catch {
+    // Unloading; the IndexedDB write is still in flight as a fallback.
+  }
+}
+
+function readSpill(sessionId) {
+  try {
+    return JSON.parse(sessionStorage.getItem(spillKey(sessionId)) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function ssSet(key, value) {
+  try {
+    sessionStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Imports rows spilled by a previous page into IndexedDB (only for sessions
+ * that still exist), then removes the spill. Resolves to the number of rows
+ * imported; never rejects.
+ */
+export async function importSpill() {
+  let keys = [];
+  try {
+    keys = Object.keys(sessionStorage).filter((k) => k.startsWith(SPILL_KEY));
+  } catch {
+    return 0;
+  }
+  let imported = 0;
+  for (const key of keys) {
+    const sessionId = key.slice(SPILL_KEY.length);
+    const data = readSpill(sessionId);
+    try {
+      await ready();
+      const tx = db.transaction(['sessions', 'events', 'log'], 'readwrite');
+      tx.objectStore('sessions').get(sessionId).onsuccess = (e) => {
+        if (!e.target.result || tombstones.has(sessionId)) return;
+        for (const row of data?.events || []) tx.objectStore('events').put(row);
+        for (const row of data?.log || []) tx.objectStore('log').put(row);
+        imported += (data?.events?.length || 0) + (data?.log?.length || 0);
+      };
+      await txDone(tx);
+      sessionStorage.removeItem(key);
+    } catch (err) {
+      notifyError(err);
+    }
+  }
+  return imported;
 }
 
 /** Buffers rrweb events. Resolves once they're written; never rejects. */
@@ -361,6 +477,11 @@ export async function loadSessionData(id) {
 
 export async function deleteSession(id) {
   tombstones.add(id);
+  try {
+    sessionStorage.removeItem(spillKey(id));
+  } catch {
+    // No sessionStorage: nothing was spilled.
+  }
   pendingEvents = pendingEvents.filter((p) => p.sessionId !== id);
   pendingLog = pendingLog.filter((e) => e.sessionId !== id);
   // Drain in-flight batches (their retries now skip this session) so the
@@ -411,8 +532,21 @@ export function getSessionMirror(id) {
 export const setSessionMirror = (mirror) => lsSet(MIRROR_KEY + mirror.id, JSON.stringify(mirror));
 export const clearSessionMirror = (id) => lsSet(MIRROR_KEY + id, null);
 
-export const getActiveSessionId = (study) => lsGet(ACTIVE_KEY + study);
-export const setActiveSessionId = (study, id) => lsSet(ACTIVE_KEY + study, id);
+/**
+ * Active pointer: `{ id, study, lastActivityAt }` as JSON. The loader parses
+ * it synchronously; lastActivityAt lets both refuse to resume a stale session.
+ */
+export function getActivePointer(study) {
+  try {
+    const p = JSON.parse(lsGet(ACTIVE_KEY + study) || 'null');
+    return p && typeof p.id === 'string' ? p : null;
+  } catch {
+    return null;
+  }
+}
+export const getActiveSessionId = (study) => getActivePointer(study)?.id ?? null;
+export const setActiveSessionId = (study, id, lastActivityAt = Date.now()) =>
+  lsSet(ACTIVE_KEY + study, JSON.stringify({ id, study, lastActivityAt }));
 export const clearActiveSessionId = (study) => lsSet(ACTIVE_KEY + study, null);
 export const getLastSessionId = (study) => lsGet(LAST_KEY + study);
 export const setLastSessionId = (study, id) => lsSet(LAST_KEY + study, id);

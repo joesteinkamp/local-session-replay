@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const writes = []; // rows that actually committed
+const rows = new Map(); // committed rows by store + key (put semantics)
+const sessions = new Map();
 let abortNext = 0;
 
 function request(result) {
@@ -18,8 +20,9 @@ function fakeTx(names) {
     error: null,
     objectStore: (name) => ({
       add: (row) => staged.push({ name, row }),
+      put: (row) => staged.push({ name, row }),
       delete: () => {},
-      get: () => request(undefined),
+      get: (key) => request(name === 'sessions' ? sessions.get(key) : undefined),
       index: () => ({ getAll: () => request([]), getAllKeys: () => request([]) }),
     }),
     abort() {},
@@ -33,6 +36,7 @@ function fakeTx(names) {
       return;
     }
     writes.push(...staged);
+    for (const { name, row } of staged) if (row.id !== undefined) rows.set(`${name}/${row.id}`, row);
     tx.oncomplete?.();
   }, 5);
   return tx;
@@ -72,4 +76,39 @@ test('deleteSession() tombstones the id so a pending retry writes nothing', asyn
   await store.deleteSession('s2');
   await new Promise((r) => setTimeout(r, 400)); // past any backoff
   assert.equal(writes.filter((w) => w.row.sessionId === 's2').length, 0);
+});
+
+test('spill() + importSpill() restores unflushed rows exactly once', async () => {
+  const storage = new Map();
+  globalThis.sessionStorage = {
+    getItem: (k) => (storage.has(k) ? storage.get(k) : null),
+    setItem: (k, v) => storage.set(k, String(v)),
+    removeItem: (k) => storage.delete(k),
+  };
+  // Object.keys(sessionStorage) must list stored keys, like the real Storage.
+  globalThis.sessionStorage = new Proxy(globalThis.sessionStorage, {
+    ownKeys: () => [...storage.keys()],
+    getOwnPropertyDescriptor: (t, k) => (storage.has(k) ? { enumerable: true, configurable: true, value: storage.get(k) } : Reflect.getOwnPropertyDescriptor(t, k)),
+  });
+  sessions.set('s3', { id: 's3' });
+  rows.clear();
+  // pagehide: the IDB write commits AND the rows are spilled (the worst case for duplicates).
+  store.appendLog('s3', { ts: 1, type: 'click' });
+  store.appendEvents('s3', 'seg', [{ type: 3, timestamp: 1 }]);
+  store.flush();
+  store.spill();
+  assert.ok(storage.has('testkit:spill:s3'));
+  await store.flush();
+  const imported = await store.importSpill();
+  assert.equal(imported, 2);
+  assert.equal(storage.has('testkit:spill:s3'), false, 'spill removed after import');
+  const keys = [...rows.keys()].filter((k) => rows.get(k).sessionId === 's3');
+  assert.equal(keys.length, 2, `rows deduplicated by key: ${keys.join(', ')}`);
+});
+
+test('importSpill() skips sessions that no longer exist', async () => {
+  globalThis.sessionStorage.setItem('testkit:spill:gone', JSON.stringify({ events: [], log: [{ id: 'x:l0', sessionId: 'gone', ts: 1, type: 'click' }] }));
+  rows.clear();
+  await store.importSpill();
+  assert.equal([...rows.values()].filter((r) => r.sessionId === 'gone').length, 0);
 });

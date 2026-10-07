@@ -59,9 +59,15 @@ DB `testkit`, version 1. Object stores:
 Pointers are scoped **per study** (`<study>` = normalized `config.study`), so
 several prototypes on one origin never resume each other's sessions:
 
-- `localStorage['testkit:active:<study>']` = id of the in-progress session (absent
-  when none). The loader reads it synchronously to stay active across navigation
-  without `?test=1`; a page whose study differs ignores it and never touches it.
+- `localStorage['testkit:active:<study>']` = JSON `{ id, study, lastActivityAt }` for
+  the in-progress session (absent when none), refreshed on every controller update
+  and every 15 s while recording/paused. The loader parses it synchronously to stay
+  active across navigation without `?test=1`, **only if `lastActivityAt` is under
+  30 min old** (`STALE_MS`, shared by loader and controller). A page whose study
+  differs ignores it and never touches it. A stale session is never resumed: if
+  the page is activated anyway (`?test=1`), boot marks it `stopped` at
+  `lastActivityAt` (logging `task-end {completed:false, reason:'stale'}` and
+  `session-end {reason:'stale'}`) and moves it to `testkit:last:<study>`.
 - `localStorage['testkit:last:<study>']` = id of the most recent *stopped* session
   that hasn't been discarded, so a reload (with `?test=1`) can still export it.
 - `localStorage['testkit:mirror:<sessionId>']` = `{ id, rev, fields }`: a synchronous
@@ -69,6 +75,12 @@ several prototypes on one origin never resume each other's sessions:
   update. IndexedDB writes still in flight at unload are aborted, so when restoring,
   the controller applies the mirror if its `rev` is newer than `SessionRecord.rev`.
   Cleared on stop (after the final write lands) and on discard.
+- `sessionStorage['testkit:spill:<sessionId>']` = `{ events: [chunk], log: [entry] }`:
+  on pagehide, rows of every unfinished write batch are copied here synchronously
+  (log-only if events exceed the quota) and imported into IndexedDB by the next
+  boot before anything else, then removed. Every event chunk and log row carries
+  a deterministic string key `id` (`<batchId>:e<n>` / `<batchId>:l<n>`) and is
+  written with `put`, so a row that also committed from pagehide is imported idempotently.
 
 ```js
 SessionRecord = {
@@ -86,6 +98,7 @@ SessionRecord = {
   taskStartedAt|null,              // current task start, shifted forward by pauses
   tasksCompleted,                  // tasks ended via nextTask()
   rev,                             // bumped on every controller update (see testkit:mirror)
+  lastActivityAt,                  // refreshed on every controller update and ~15 s heartbeat
 }
 ```
 `phase: 'preflight'` is never persisted — preflight is in-memory only.
@@ -99,7 +112,9 @@ Store API (all async):
 `deleteSession(id)`.
 Also: `flush()` (write buffered events/log now; never rejects), `onError(fn) → off`
 (write failures given up on after retries), `lastAudioChunk(sessionId)`,
-`getActiveSessionId(study)`, `setActiveSessionId(study, id)`, `clearActiveSessionId(study)`,
+`getActivePointer(study) → { id, study, lastActivityAt } | null`, `getActiveSessionId(study)`,
+`setActiveSessionId(study, id, lastActivityAt = now)`, `clearActiveSessionId(study)`,
+`spill()` (sync, pagehide) and `importSpill() → rowsImported`,
 the same three for `LastSessionId`, `get/set/clearSessionMirror(id | mirror)`, and the
 pure helper `elapsedMsFor(sessionRecord, now)`. `appendEvents`/`appendLog` buffer in
 memory and resolve once written (≤2 s, immediately after a full snapshot, and on
@@ -122,6 +137,7 @@ LogEntry = {
   source?,                   // error/rejection: 'window'|'resource'|'console'|'promise'
   gapStart?, gapMs?,         // audio-gap: last stored audio chunk ts (else previous page's start, else session start), gap length (null if mic unavailable)
   completed?,                // task-end: true when ended via nextTask(), false when the session was stopped mid-task
+  reason?,                   // task-end/session-end: 'stale' when boot stopped an abandoned session
 }
 type ∈ 'click'|'input'|'change'|'submit'|'nav'|'error'|'rejection'|
        'session-start'|'session-resume'|'task-start'|'task-end'|'followup'|
@@ -132,7 +148,11 @@ Events originating inside the overlay (its shadow host carries class
 `testkit-block`) are never logged. Input values: `'***'` when masked and
 non-empty, `''` when empty; passwords always masked; checkbox/radio log
 `'true'`/`'false'` even when masking (as rrweb records checked state).
-`console.error` calls are logged as `error` with `source: 'console'`.
+`console.error` calls are logged as `error` with `source: 'console'`; only the
+first argument is kept (string or Error message, clipped to 200 chars; objects
+become a type label such as `[Object]`), since prototypes often log form state.
+Nothing is logged after `session-end`. In rrweb, hidden inputs are always
+masked; password always; all other inputs when `mask.inputs`.
 
 ## rrweb custom events
 
@@ -141,7 +161,10 @@ so it appears in the replay stream. Tags: `testkit:task-start {taskId,index,prom
 `testkit:task-end {taskId,index,completed}`, `testkit:pause`, `testkit:resume`,
 `testkit:mute`, `testkit:unmute`, `testkit:session-end`.
 
-## Controller (`src/core/session.js` → `createController({ config, store })`)
+## Controller (`src/core/session.js` → `createController({ config, store, deps? })`)
+
+`deps` optionally replaces `{ createRecorder, createInteractionLog, createAudioCapture }`
+(tests inject fakes); it defaults to the real modules.
 
 The overlay talks only to this object.
 
@@ -178,7 +201,10 @@ On boot the controller may also land in `stopped` (restored from `testkit:last`)
 and `taskElapsedMs` (current task time excluding paused time) — implementing the
 overlay requests below.
 `state.audio.enabled` reflects the tester's choice, so a denied mic shows as
-`{ enabled: true, status: 'denied' }`.
+`{ enabled: true, status: 'denied' }`. A *dismissed* prompt (Permissions API
+reports `prompt` after `NotAllowedError`) shows as `denied` with error
+'Microphone prompt was dismissed' and is retried on the next page; only a
+confirmed `denied` permission stops the session from asking again.
 
 On boot, if `localStorage['testkit:active:<study>']` names a session of this study in
 `recording`/`paused`, the controller resumes it automatically (new segment,

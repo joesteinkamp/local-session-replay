@@ -8,6 +8,14 @@ const BLOCK_CLASS = 'testkit-block';
 // plain DOM text. rrweb checks ancestors (closest()) for both snapshot text
 // and characterData mutations, so this masks nested editable content too.
 export const EDITABLE_SELECTOR = '[contenteditable]:not([contenteditable="false"])';
+// rrweb's maskAllInputs list, plus `hidden` (often tokens or form state). Passing
+// the list explicitly is the only way to extend it: maskAllInputs: true
+// replaces maskInputOptions wholesale.
+const MASK_ALL_INPUTS = {
+  color: true, date: true, 'datetime-local': true, email: true, month: true, number: true, range: true,
+  search: true, tel: true, text: true, time: true, url: true, week: true, textarea: true, select: true,
+  password: true, hidden: true,
+};
 
 /**
  * @param {object} opts
@@ -37,7 +45,8 @@ export function createRecorder({ config, onEvent }) {
               warnOnce(err);
             }
           },
-          maskAllInputs: config.mask.inputs,
+          maskAllInputs: false,
+          maskInputOptions: config.mask.inputs ? MASK_ALL_INPUTS : { password: true, hidden: true },
           maskTextSelector: config.mask.inputs ? EDITABLE_SELECTOR : undefined,
           blockClass: BLOCK_CLASS,
           checkoutEveryNms: config.checkoutEveryNms,
@@ -48,8 +57,9 @@ export function createRecorder({ config, onEvent }) {
           // with such images should set inlineImages: false.
           inlineImages: config.inlineImages !== false,
           collectFonts: true,
+          // Inlined images are re-encoded on every checkout; WebP is far smaller than PNG.
+          dataURLOptions: { type: 'image/webp', quality: 0.7 },
           recordCanvas: false,
-          sampling: { input: 'last' },
           // Returning true marks the error handled so rrweb doesn't rethrow
           // it into the page's own callbacks.
           errorHandler(err) {

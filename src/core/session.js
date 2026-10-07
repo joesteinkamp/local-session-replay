@@ -9,7 +9,7 @@
 
 import { createRecorder } from './recorder.js';
 import { createInteractionLog } from './interaction-log.js';
-import { createAudioCapture, micErrorStatus, pickMimeType } from './audio.js';
+import { classifyMicError, createAudioCapture, pickMimeType } from './audio.js';
 import { clip } from './selector.js';
 import { elapsedMsFor } from './store.js';
 import { exportSession as buildExport } from '../export/exporter.js';
@@ -19,6 +19,11 @@ const MAX_ANSWER = 1000;
 const CHANNEL = 'testkit';
 const PING_TIMEOUT_MS = 150;
 const OTHER_TAB_ERROR = 'Recording is active in another tab';
+// A session untouched for this long is not resumed (tab closed, browser
+// crashed): it's stopped and left exportable. Must match src/loader.js.
+export const STALE_MS = 30 * 60 * 1000;
+const HEARTBEAT_MS = 15_000;
+const REAL_DEPS = { createRecorder, createInteractionLog, createAudioCapture };
 
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -50,7 +55,11 @@ function download(filename, file) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-export async function createController({ config, store }) {
+/**
+ * `deps` swaps the capture modules (tests use fakes); defaults to the real ones.
+ */
+export async function createController({ config, store, deps = {} }) {
+  const { createRecorder, createInteractionLog, createAudioCapture } = { ...REAL_DEPS, ...deps };
   const listeners = new Set();
   let session = null; // in-memory mirror of the SessionRecord
   let segmentId = null; // this page load's segment
@@ -58,6 +67,8 @@ export async function createController({ config, store }) {
   let ilog = null;
   let audio = null;
   let ticker = null;
+  let heartbeat = null;
+  let ended = false; // session-end was logged on this page: later entries are dropped
   let chain = Promise.resolve();
   // Bumped whenever a session's lifecycle on this page ends or restarts, so
   // background work (audio restore) started earlier can tell it's stale.
@@ -213,7 +224,7 @@ export async function createController({ config, store }) {
   // Fields that must survive an immediate navigation. An IndexedDB write still
   // in flight at unload is aborted, so each persist also mirrors these to
   // localStorage synchronously; restores apply the mirror when its rev is newer.
-  const MIRRORED = ['phase', 'taskIndex', 'taskStartedAt', 'tasksCompleted', 'pausedMs', 'pausedAt', 'muted', 'endedAt', 'audio'];
+  const MIRRORED = ['phase', 'taskIndex', 'taskStartedAt', 'tasksCompleted', 'pausedMs', 'pausedAt', 'muted', 'endedAt', 'audio', 'lastActivityAt'];
 
   function mirrorFields(rec) {
     const fields = {};
@@ -221,11 +232,26 @@ export async function createController({ config, store }) {
     return fields;
   }
 
+  // Every persist doubles as an activity heartbeat: lastActivityAt goes into
+  // the record, the mirror and (while live) the loader's active pointer.
   function persist(patch) {
+    const now = Date.now();
     session.rev = (session.rev || 0) + 1;
-    Object.assign(session, patch);
+    Object.assign(session, patch, { lastActivityAt: now });
     store.setSessionMirror?.({ id: session.id, rev: session.rev, fields: mirrorFields(session) });
-    return store.updateSession(session.id, { ...patch, rev: session.rev }).catch(reportError);
+    if (owner && (session.phase === 'recording' || session.phase === 'paused')) {
+      store.setActiveSessionId?.(session.study, session.id, now);
+    }
+    return store.updateSession(session.id, { ...patch, lastActivityAt: now, rev: session.rev }).catch(reportError);
+  }
+
+  function startHeartbeat() {
+    if (!heartbeat) heartbeat = setInterval(() => session && owner && persist({}), HEARTBEAT_MS);
+  }
+
+  function stopHeartbeat() {
+    clearInterval(heartbeat);
+    heartbeat = null;
   }
 
   function withMirror(rec) {
@@ -258,13 +284,20 @@ export async function createController({ config, store }) {
       config: cfg,
       onEvent: (event) => store.appendEvents(id, segmentId, [event]),
     });
+    ended = false;
     ilog = createInteractionLog({
       mask: cfg.mask.inputs,
       getTaskId: () => currentTask()?.id ?? null,
-      onEntry: (entry) => store.appendLog(id, entry),
+      // Nothing may follow session-end (e.g. a late audio-gap from a cancelled restore).
+      onEntry: (entry) => {
+        if (!ended) store.appendLog(id, entry);
+        if (entry.type === 'session-end') ended = true;
+      },
+      onNavigationIntent: () => queueMicrotask(() => store.flush?.()),
     });
     owner = true;
     openChannel();
+    startHeartbeat();
   }
 
   function startCapture({ pageLoad = false } = {}) {
@@ -281,6 +314,7 @@ export async function createController({ config, store }) {
     generation++;
     stopCapture();
     stopTicker();
+    stopHeartbeat();
     recorder = null;
     ilog = null;
     session = null;
@@ -335,9 +369,14 @@ export async function createController({ config, store }) {
       return { ok: true };
     } catch (err) {
       if (!isCurrent()) return { ok: false, stale: true };
-      const { status, error } = err?.name === 'AbortError' ? { status: 'off', error: null } : micErrorStatus(err);
+      if (err?.name === 'AbortError') {
+        setAudio({ status: 'off', error: null });
+        return { ok: false, error: messageOf(err) };
+      }
+      const { status, error, persistent } = await classifyMicError(err);
+      if (!isCurrent()) return { ok: false, stale: true };
       setAudio({ status, error });
-      return { ok: false, error: error || messageOf(err) };
+      return { ok: false, error: error || messageOf(err), persistent };
     }
   }
 
@@ -376,8 +415,8 @@ export async function createController({ config, store }) {
     const res = await acquireMic(isCurrent);
     if (!isCurrent() || res.stale) return;
     if (!res.ok) {
-      // Don't re-prompt on every page once the tester has said no.
-      if (state.audio.status === 'denied') persist({ audio: { ...session.audio, enabled: false } });
+      // Stop asking only after a real denial; a dismissed prompt is retried on the next page.
+      if (res.persistent) persist({ audio: { ...session.audio, enabled: false } });
       log('audio-gap', { gapStart, gapMs: null, message: `Microphone unavailable: ${res.error}` });
       return;
     }
@@ -429,8 +468,12 @@ export async function createController({ config, store }) {
 
   async function resumeSession(rec) {
     generation++;
+    // A bfcache restore may arrive with the old page's ticker and mic still live.
+    stopTicker();
     if (await capturedElsewhere(rec.id)) {
       // Show the session read-only; never write to it from this tab.
+      await releaseAudio();
+      stopHeartbeat();
       session = rec;
       otherTab = true;
       state = { ...stateFromSession(rec.phase), otherTab: true, error: OTHER_TAB_ERROR };
@@ -444,6 +487,7 @@ export async function createController({ config, store }) {
     // Also rewrites the mirrored fields so a mirror-reconciled record lands in IndexedDB.
     await persist({ ...mirrorFields(rec), segments });
     attachCapture();
+    store.setActiveSessionId?.(session.study, session.id, session.lastActivityAt);
     state = stateFromSession(rec.phase);
     if (rec.phase === 'recording') {
       startCapture({ pageLoad: true });
@@ -453,24 +497,72 @@ export async function createController({ config, store }) {
         restartAudioAfterNavigation().catch(reportError);
       }
     } else {
-      // Paused: nothing is captured until resume(), which also re-acquires the mic.
+      // Paused: nothing is captured until resume(), which also re-acquires the
+      // mic. Release any stream a bfcache restore brought back.
+      await releaseAudio();
       log('session-resume', {});
     }
     emit();
   }
 
+  // The last moment the session was demonstrably alive.
+  function lastActivity(rec, pointer) {
+    const segments = rec.segments || [];
+    return Math.max(
+      Number(pointer?.lastActivityAt) || 0,
+      Number(rec.lastActivityAt) || 0,
+      Number(segments[segments.length - 1]?.startedAt) || 0,
+      Number(rec.startedAt) || 0,
+    );
+  }
+
+  // Stops a session that went quiet (tab closed, crash) without resuming
+  // capture, ending it at its last activity so it stays exportable.
+  async function stopStale(rec, at) {
+    session = rec;
+    const url = rec.segments?.[rec.segments.length - 1]?.url ?? location.href;
+    const task = currentTask();
+    store.setLastSessionId?.(rec.study, rec.id);
+    store.clearActiveSessionId?.(rec.study);
+    if (task) store.appendLog(rec.id, { ts: at, type: 'task-end', url, taskId: task.id, completed: false, reason: 'stale' });
+    store.appendLog(rec.id, { ts: at, type: 'session-end', url, taskId: null, reason: 'stale' });
+    const pausedMs = (rec.pausedMs || 0) + (rec.pausedAt ? Math.max(0, at - rec.pausedAt) : 0);
+    await persist({ phase: 'stopped', endedAt: at, pausedAt: null, pausedMs, taskStartedAt: null });
+    await store.flush?.();
+    store.clearSessionMirror?.(rec.id);
+    state = stateFromSession('stopped');
+    emit();
+  }
+
+  // Returns { resume } for a live session to resume, or { done: true } when
+  // the active session was handled here (stale → stopped).
   async function loadActive() {
-    const activeId = store.getActiveSessionId?.(config.study);
-    if (!activeId) return null;
+    const pointer = store.getActivePointer?.(config.study);
+    const activeId = pointer?.id ?? store.getActiveSessionId?.(config.study);
+    if (!activeId) return {};
     const rec = withMirror(await store.getSession(activeId).catch(() => null));
-    if (rec && rec.study === config.study && (rec.phase === 'recording' || rec.phase === 'paused')) return rec;
+    if (rec && rec.study === config.study) {
+      if (rec.phase === 'recording' || rec.phase === 'paused') {
+        const at = lastActivity(rec, pointer);
+        if (Date.now() - at > STALE_MS) {
+          await stopStale(rec, at);
+          return { done: true };
+        }
+        return { resume: rec };
+      }
+      // Stopped (the stopping page died before moving the pointer): keep it exportable.
+      if (rec.phase === 'stopped') store.setLastSessionId?.(rec.study, rec.id);
+    }
     store.clearActiveSessionId?.(config.study);
-    return null;
+    return {};
   }
 
   async function bootFromStore() {
+    // Rows the previous page spilled at unload land before anything reads or appends.
+    await store.importSpill?.();
     const active = await loadActive();
-    if (active) return resumeSession(active);
+    if (active.done) return;
+    if (active.resume) return resumeSession(active.resume);
     // A stopped-but-not-discarded session stays exportable across reloads.
     const lastId = store.getLastSessionId?.(config.study);
     if (lastId) {
@@ -497,6 +589,7 @@ export async function createController({ config, store }) {
           // Best effort: the final chunk is written only if the page lives long enough.
           audio?.stopSegment();
           store.flush?.();
+          store.spill?.();
         }
         // A page entering bfcache must not answer pings for a session it no
         // longer captures; pageshow re-establishes ownership.
@@ -640,9 +733,11 @@ export async function createController({ config, store }) {
           taskStartedAt: null,
           tasksCompleted: 0,
         };
-        await store.createSession(session);
-        store.setActiveSessionId?.(session.study, session.id);
+        // Pointer first: a navigation during the createSession await must not orphan the record.
+        store.setActiveSessionId?.(session.study, session.id, now);
         store.clearLastSessionId?.(session.study);
+        session.lastActivityAt = now;
+        await store.createSession(session);
         attachCapture();
         state = {
           ...stateFromSession('recording'),
@@ -783,6 +878,8 @@ export async function createController({ config, store }) {
   async function doStop({ taskEnded = false } = {}) {
     if (state.phase !== 'recording' && state.phase !== 'paused') return;
     generation++; // cancels a pending audio restore
+    // Set first: however far stopping gets, the session stays exportable.
+    store.setLastSessionId?.(session.study, session.id);
     const now = Date.now();
     const wasRecording = state.phase === 'recording';
     flushInputs();
@@ -791,13 +888,13 @@ export async function createController({ config, store }) {
     if (wasRecording) mark('testkit:session-end', {});
     stopCapture();
     stopTicker();
+    stopHeartbeat();
     owner = false;
     await releaseAudio();
     const pausedMs = (session.pausedMs || 0) + (session.pausedAt ? now - session.pausedAt : 0);
     await persist({ phase: 'stopped', endedAt: now, pausedAt: null, pausedMs, taskStartedAt: null });
     await store.flush?.();
     store.clearActiveSessionId?.(session.study);
-    store.setLastSessionId?.(session.study, session.id);
     // IndexedDB now holds the final record; the mirror would only go stale.
     store.clearSessionMirror?.(session.id);
     set({ phase: 'stopped', taskStartedAt: null, audio: { ...state.audio, status: 'off' } });
