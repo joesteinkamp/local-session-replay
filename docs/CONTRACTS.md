@@ -20,13 +20,15 @@ in the same edit and say so in your report.
 
 ```
 src/loader.js              → public/v1/testkit.js        (lead)
+src/index.js, index.d.ts   → dist/index.js (package entry) (lead)
+src/activation.js          — shared by loader.js and index.js (lead)
 src/core/index.js          → public/v1/testkit-core.js   (lead: wiring/boot)
 src/core/config.js                                       (lead)
 src/core/store.js, session.js, recorder.js,
 src/core/interaction-log.js, selector.js, audio.js       (data/recorder agent)
 src/overlay/**                                           (overlay agent)
 src/export/**, src/player/** → public/v1/testkit-player.js (export/player agent)
-demo/**, scripts/**, .gitlab-ci.yml, README.md           (lead)
+demo/**, scripts/**, .github/**, README.md              (lead)
 test/<module>.test.js     — each agent owns tests for its own modules (node:test)
 ```
 
@@ -276,7 +278,11 @@ data, seekToWall, getOffset }` for automated checks.
    `virtual:player-bundle` resolves to the text of step 1's output
    (`import PLAYER_JS from 'virtual:player-bundle'`).
 3. `src/loader.js` → `public/v1/testkit.js`.
-4. `demo/` copied to `public/demo/`.
+4. `src/index.js` → `dist/index.js` (ESM, code-split: the dynamic import of
+   `src/core/index.js` becomes `dist/chunks/core-*.js`, which exports
+   `start(config)`). `src/index.d.ts` and the three `public/v1/` files are
+   copied to `dist/`.
+5. `demo/` copied to `public/demo/`.
 
 ## Overlay (`src/overlay/overlay.js` → `mountOverlay(controller) → { destroy }`)
 

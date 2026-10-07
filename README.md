@@ -1,24 +1,64 @@
 # TestKit
 
-Local session replay and think-aloud recording for GitLab Pages prototypes.
-Add one `<script>` tag, open the prototype with `?test=1`, run through scripted
+Local session replay and think-aloud recording for web prototypes.
+Add TestKit to an app, open it with `?test=1`, run through scripted
 tasks while thinking aloud, and download **one self-contained HTML file** with
 the replay, synced audio, and an agent-ready summary.
 
 No backend, no third-party services. Nothing leaves the tester's machine until
 they download the file.
 
-## Setup
+## Install
+
+Three ways in, depending on the host app. In every case the recorder is only
+downloaded when testing is active, so casual viewers pay ~1 KB.
+
+### 1. Bundled apps (Vite, webpack, Next, …): install from GitHub
+
+```sh
+npm i -D github:<you>/local-session-replay   # pin a tag: …/local-session-replay#v1.0.0
+```
+
+```js
+import { init } from 'local-session-replay';
+
+init({
+  study: 'grid-filters-v2',
+  tasks: [
+    { id: 'filter', prompt: 'Filter to healthcare companies' },
+    { id: 'export', prompt: 'Export the current view' },
+  ],
+});
+```
+
+Call `init()` once, in the browser, at app startup. Client-side route changes
+are recorded automatically. With server rendering (Next, Nuxt, …), call it
+client-side, e.g. in a top-level `useEffect`; on the server it does nothing.
+The recorder is a dynamic import, so the host bundler splits it into its own
+chunk. Types ship with the package. The package is ES modules only, so a
+CommonJS test runner (e.g. Jest) needs it transformed or mocked.
+
+Activation defaults to `?test=1`. Passing an `activate` function replaces that
+check rather than adding to it, e.g. `activate: () => import.meta.env.DEV`
+(Vite) or `() => process.env.NODE_ENV !== 'production'` (webpack/Next).
+
+Installing from git builds the package on install (its `prepare` script), so
+the package manager must be allowed to run it:
+
+- **npm:** recent versions list it under `allow-scripts`; run
+  `npm approve-scripts local-session-replay`.
+- **pnpm 10+:** blocks it by default and installs an empty package. Add it to
+  `pnpm.onlyBuiltDependencies` in `package.json` (or run `pnpm approve-builds`)
+  and reinstall.
+
+### 2. Plain HTML: script tag from GitHub Pages
 
 ```html
-<script src="https://<group>.gitlab.io/testkit/v1/testkit.js"></script>
+<script src="https://<you>.github.io/local-session-replay/v1/testkit.js"></script>
 <script>
   TestKit.init({
     study: 'grid-filters-v2',
-    tasks: [
-      { id: 'filter', prompt: 'Filter to healthcare companies' },
-      { id: 'export', prompt: 'Export the current view' },
-    ],
+    tasks: [{ id: 'filter', prompt: 'Filter to healthcare companies' }],
   });
 </script>
 ```
@@ -26,11 +66,22 @@ they download the file.
 Put both tags on **every page** of a multi-page prototype (a shared
 `testkit-config.js` works well — see `demo/`). Pin the versioned path (`/v1/`).
 The build writes to `/v<major>/` from `package.json`, so a breaking release
-goes to a new path. Pages replaces the whole site on each deploy, so when `/v2/`
-ships, keep publishing `/v1/` from a `v1` branch or tag build alongside it.
+goes to a new path. Pages replaces the whole site on each deploy, so before
+`/v2/` ships, the workflow must also build `/v1/` (e.g. from a `v1` tag) into
+the same artifact.
 
-`testkit.js` is a ~1 KB loader. The recorder (`testkit-core.js`) is only
-fetched when testing is active, so casual viewers pay nothing.
+### 3. Self-hosted script files
+
+Copy `testkit.js`, `testkit-core.js` and `testkit-player.js` into one folder of
+the host app's static files (they're in `public/v1/` after `npm run build`, or
+`node_modules/local-session-replay/dist/script/` after option 1's install) and
+load `testkit.js` as in option 2. The loader fetches `testkit-core.js` from its
+own folder. If the host injects `testkit.js` without a `<script src>`, pass
+`baseUrl` to say where that folder is, as an absolute URL or a root-relative
+path (`/testkit/v1/`). A plain relative path resolves against each page.
+
+Use one install per page: if both the package and the script tag are present,
+the first `init()` wins.
 
 ## Config reference
 
@@ -42,7 +93,8 @@ fetched when testing is active, so casual viewers pay nothing.
 | `mask` | `{ inputs: true }` | Masks typed values in the replay and the interaction log. |
 | `checkoutEveryNms` | `60000` | Periodic full DOM snapshots, so seeking stays fast. |
 | `inlineImages` | `true` | Embeds `<img>` content in the recording so replays survive redeploys. Turn off for image-heavy prototypes (large files) or prototypes with cross-origin images whose servers don't send CORS headers — rrweb retries those with `crossOrigin` set, which can break them on the live page. |
-| `commitSha` | `<meta name="testkit:commit">` | Recorded in the export metadata. In CI, template `$CI_COMMIT_SHA` into the meta tag. |
+| `baseUrl` | folder of `testkit.js` | Script-tag installs only: where to fetch `testkit-core.js` from. Absolute or root-relative. |
+| `commitSha` | `<meta name="testkit:commit">` | Recorded in the export metadata. In CI, template the commit SHA (e.g. `$GITHUB_SHA`) into the meta tag. |
 | `tasks[]` | `[]` | `{ id, prompt, successHint?, timeLimit?, followUp? }`. `timeLimit` is seconds (a gentle nudge, never auto-advances). `followUp` asks a question after the task. `successHint` is shown behind a disclosure and in the summary as "Expected". |
 
 ## Running a session (facilitator checklist)
@@ -84,14 +136,15 @@ rather than loading from the prototype's server.
 ```sh
 npm install
 npm test          # node:test unit tests
-npm run build     # → public/v1/{testkit,testkit-core,testkit-player}.js + public/demo/
+npm run build     # → public/v1/ + public/demo/ (Pages) and dist/ (the package)
 npm run serve     # build, then serve public/ on :8080 → /demo/index.html?test=1
 ```
 
 Module boundaries and data formats are in `docs/CONTRACTS.md`.
 `scripts/fixture-export.mjs` writes a synthetic export for working on the player.
-GitLab CI (`.gitlab-ci.yml`) tests, builds, and publishes `public/` to Pages on the
-default branch.
+GitHub Actions (`.github/workflows/pages.yml`) tests every push and PR, and
+publishes `public/` to GitHub Pages from `main`. Enable it once under the
+repo's Settings → Pages → Source: GitHub Actions.
 
 ## Known limitations
 
@@ -104,3 +157,7 @@ default branch.
   Audio-heavy studies are smoother on single-page prototypes.
 - Desktop browsers are the primary target.
 - Transcription (in-browser Whisper) is planned for v1.5.
+
+## License
+
+MIT. See `LICENSE`.

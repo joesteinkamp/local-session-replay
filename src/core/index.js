@@ -1,4 +1,5 @@
 // public/v1/testkit-core.js — loaded by the loader only when testing is active.
+// Also the dynamic-import target of the package entry (src/index.js).
 import { normalizeConfig } from './config.js';
 import * as store from './store.js';
 import { createController } from './session.js';
@@ -15,10 +16,10 @@ async function boot(userConfig) {
   const mount = () => mountOverlay(controller);
   if (document.body) mount();
   else document.addEventListener('DOMContentLoaded', mount, { once: true });
-  window.TestKit.controller = controller; // for debugging & automated checks
+  if (window.TestKit) window.TestKit.controller = controller; // for debugging & automated checks
 }
 
-window.__TestKitCore = {
-  boot: (config, baseUrl) =>
-    boot(config, baseUrl).catch((err) => console.error('[TestKit] boot failed', err)),
-};
+/** Used by the package entry (src/index.js); the script-tag loader calls __TestKitCore.boot. */
+export const start = (config) => boot(config).catch((err) => console.error('[TestKit] boot failed', err));
+
+window.__TestKitCore = { boot: start };

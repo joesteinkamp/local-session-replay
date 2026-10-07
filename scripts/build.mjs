@@ -1,6 +1,7 @@
-// Builds TestKit into public/ (the GitLab Pages artifact).
+// Builds TestKit into public/ (the GitHub Pages artifact) and dist/ (the npm
+// package: an ES module entry plus copies of the script-tag files).
 import * as esbuild from 'esbuild';
-import { cp, mkdir, readFile, rm } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -10,6 +11,7 @@ const { version } = JSON.parse(await readFile(path.join(root, 'package.json'), '
 // Output path follows the major version (/v1/, /v2/, …) so a breaking release
 // never overwrites the path existing prototypes load.
 const out = path.join(root, 'public', `v${version.split('.')[0]}`);
+const dist = path.join(root, 'dist');
 
 const common = {
   bundle: true,
@@ -49,11 +51,28 @@ async function assertAscii(files) {
 }
 
 async function buildAll() {
+  await rm(out, { recursive: true, force: true });
   await mkdir(out, { recursive: true });
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/player/player.js')], outfile: path.join(out, 'testkit-player.js') });
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/core/index.js')], outfile: path.join(out, 'testkit-core.js'), plugins: [playerBundlePlugin] });
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/loader.js')], outfile: path.join(out, 'testkit.js') });
   await assertAscii([path.join(out, 'testkit.js'), path.join(out, 'testkit-core.js'), path.join(out, 'testkit-player.js')]);
+  // Package entry: splitting turns the dynamic import of the recorder into its
+  // own chunk, which the host's bundler then splits again.
+  await rm(dist, { recursive: true, force: true });
+  await esbuild.build({
+    ...common,
+    entryPoints: [path.join(root, 'src/index.js')],
+    outdir: dist,
+    format: 'esm',
+    splitting: true,
+    chunkNames: 'chunks/[name]-[hash]',
+    plugins: [playerBundlePlugin],
+  });
+  await cp(path.join(root, 'src/index.d.ts'), path.join(dist, 'index.d.ts'));
+  await cp(out, path.join(dist, 'script'), { recursive: true });
+  const esm = (await readdir(dist, { recursive: true })).filter((f) => f.endsWith('.js') && !f.startsWith('script'));
+  await assertAscii(esm.map((f) => path.join(dist, f)));
   await rm(path.join(root, 'public', 'demo'), { recursive: true, force: true });
   await cp(path.join(root, 'demo'), path.join(root, 'public', 'demo'), { recursive: true });
 }
