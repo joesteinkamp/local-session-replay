@@ -5,6 +5,8 @@
 export const RAGE_CLICK_COUNT = 3;
 export const RAGE_CLICK_WINDOW_MS = 1000;
 export const IDLE_THRESHOLD_MS = 20000;
+// Recorder start latency leaves sub-second slivers at segment edges; ignore them.
+export const AUDIO_GAP_MIN_MS = 500;
 
 const TRAIL_TYPES = new Set(['click', 'input', 'change', 'submit', 'nav', 'error', 'rejection', 'pause', 'resume', 'mute', 'unmute', 'audio-gap']);
 const ERROR_TYPES = new Set(['error', 'rejection']);
@@ -107,7 +109,7 @@ function boundaryEntries(log, events = []) {
     const tag = ev.data?.tag;
     const p = ev.data?.payload || {};
     if (tag === 'testkit:task-start') derived.push({ ts: ev.timestamp, type: 'task-start', taskId: p.taskId ?? null, index: p.index });
-    else if (tag === 'testkit:task-end') derived.push({ ts: ev.timestamp, type: 'task-end', taskId: p.taskId ?? null, index: p.index });
+    else if (tag === 'testkit:task-end') derived.push({ ts: ev.timestamp, type: 'task-end', taskId: p.taskId ?? null, index: p.index, completed: p.completed });
   }
   return derived.length ? [...log, ...derived].sort((a, b) => a.ts - b.ts) : log;
 }
@@ -125,19 +127,24 @@ function sessionBounds({ session = {}, log = [], events = [] }) {
   };
 }
 
-// One span per task that was started: { taskId, index, task, start, end, ended }.
+// One span per task that was started:
+// { taskId, index, task, start, end, ended, completed }.
 // A task without a task-end closes at the next task-start, session-end, or the
-// last known timestamp.
+// last known timestamp. `ended` means a task-end was logged; `completed` means
+// the tester finished it (Next), not that Stop closed it. task-end carries
+// `completed`; older data falls back to session.tasksCompleted, which counts
+// Next presses and therefore the first N ended spans.
 export function buildTaskSpans({ session = {}, log = [], events = [] }) {
   const tasks = session.tasks || session.config?.tasks || [];
   const entries = boundaryEntries(log, events);
   const { end: sessionEnd } = sessionBounds({ session, log, events });
   const spans = [];
   let current = null;
-  const close = (ts, ended) => {
+  const close = (ts, ended, completed = ended ? null : false) => {
     if (!current) return;
     current.end = Math.max(current.start, ts);
     current.ended = ended;
+    current.completed = typeof completed === 'boolean' ? completed : null;
     spans.push(current);
     current = null;
   };
@@ -147,13 +154,57 @@ export function buildTaskSpans({ session = {}, log = [], events = [] }) {
       const index = Number.isInteger(e.index) ? e.index : tasks.findIndex((t) => t.id === e.taskId);
       current = { taskId: e.taskId ?? tasks[index]?.id ?? null, index, task: tasks[index] || null, start: e.ts, end: null, ended: false };
     } else if (e.type === 'task-end' && current && (e.taskId == null || e.taskId === current.taskId)) {
-      close(e.ts, true);
+      close(e.ts, true, e.completed);
     } else if (e.type === 'session-end') {
       close(e.ts, false);
     }
   }
   close(sessionEnd ?? current?.start ?? 0, false);
+  const known = Number.isFinite(session.tasksCompleted) ? session.tasksCompleted : null;
+  let counted = 0;
+  for (const span of spans) {
+    if (span.completed !== null) continue;
+    span.completed = known === null ? span.ended : counted < known;
+    counted += 1;
+  }
   return spans;
+}
+
+// ---------- audio coverage ----------
+
+// Uncovered intervals of [start, end) after removing `covered` spans.
+function uncovered(start, end, covered, minMs) {
+  const sorted = covered.filter((c) => c.end > start && c.start < end).sort((a, b) => a.start - b.start);
+  const out = [];
+  let cursor = start;
+  for (const c of sorted) {
+    if (c.start - cursor >= minMs) out.push({ start: cursor, end: c.start });
+    cursor = Math.max(cursor, c.end);
+  }
+  if (end - cursor >= minMs) out.push({ start: cursor, end });
+  return out;
+}
+
+// Recording time (minus pauses) with no audio segment, while audio was on.
+// With `audio` segments this is computed from coverage, so silent failures
+// show up even when no audio-gap entry was logged; each gap borrows the
+// reason from an overlapping audio-gap entry. Without segments it falls back
+// to the logged entries. Returns [{ start, end, durationMs, reason }].
+export function audioGaps({ session = {}, log = [], audio, start, end, pauses = [], minMs = AUDIO_GAP_MIN_MS }) {
+  if (session.audio?.enabled === false) return [];
+  const logged = log.filter((e) => e.type === 'audio-gap').map((e) => {
+    const ms = gapMsOf(e);
+    const from = Number.isFinite(e.gapStart) ? e.gapStart : ms !== null ? e.ts - ms : e.ts;
+    return { start: from, end: ms !== null ? from + ms : e.ts, ts: e.ts, durationMs: ms, reason: e.message || null };
+  });
+  if (!Array.isArray(audio) || !Number.isFinite(start) || !Number.isFinite(end)) {
+    return logged.map(({ ts, ...g }) => g);
+  }
+  const covered = [...pauses, ...audio.filter((a) => Number.isFinite(a.startTs) && Number.isFinite(a.endTs)).map((a) => ({ start: a.startTs, end: a.endTs }))];
+  return uncovered(start, end, covered, minMs).map((g) => {
+    const why = logged.find((l) => l.reason && l.start <= g.end && Math.max(l.end, l.ts) >= g.start);
+    return { ...g, durationMs: g.end - g.start, reason: why?.reason || null };
+  });
 }
 
 // ---------- signals ----------
@@ -290,6 +341,10 @@ export function formatTrailLine(item, originTs, baseUrl) {
 
 // ---------- markdown ----------
 
+export function taskStatus(span) {
+  return span.completed ? 'Completed' : 'Not completed (session stopped)';
+}
+
 function inSpan(ts, span) {
   return ts >= span.start && ts <= span.end;
 }
@@ -301,7 +356,9 @@ function sessionSignals({ session, log, events, spans }) {
   return { start, end, pauses, outside };
 }
 
-export function buildSummary({ session = {}, log = [], events = [] } = {}) {
+// `audio` is the segment list ({ startTs, endTs }); when given, audio gaps are
+// derived from coverage rather than only from logged audio-gap entries.
+export function buildSummary({ session = {}, log = [], events = [], audio } = {}) {
   const meta = session.meta || {};
   const baseUrl = meta.prototypeUrl || session.segments?.[0]?.url || null;
   const spans = buildTaskSpans({ session, log, events });
@@ -309,6 +366,7 @@ export function buildSummary({ session = {}, log = [], events = [] } = {}) {
   const pausedTotal = start !== null && end !== null ? overlapMs(start, end, pauses) : 0;
   const tasks = session.tasks || session.config?.tasks || [];
   const viewport = meta.viewport ? `${meta.viewport.w}×${meta.viewport.h}` : 'unknown';
+  const gaps = audioGaps({ session, log, audio, start, end, pauses });
   const lines = [];
 
   lines.push(`# TestKit session: ${session.study || 'untitled-study'}`, '');
@@ -322,7 +380,7 @@ export function buildSummary({ session = {}, log = [], events = [] } = {}) {
     const paused = pausedTotal ? ` (${formatDuration(end - start - pausedTotal)} active, ${formatDuration(pausedTotal)} paused)` : '';
     lines.push(`- Duration: ${formatDuration(end - start)}${paused}`);
   }
-  lines.push(`- Tasks completed: ${spans.filter((s) => s.ended).length} of ${tasks.length || spans.length}`);
+  lines.push(`- Tasks completed: ${spans.filter((s) => s.completed).length} of ${tasks.length || spans.length}`);
   lines.push(`- Session ID: ${session.id || 'unknown'}`);
   lines.push('', 'Times in trails are mm:ss from the start of each task. Input values of "***" were masked.', '');
 
@@ -337,7 +395,8 @@ export function buildSummary({ session = {}, log = [], events = [] } = {}) {
 
     lines.push(`## Task ${label}: ${task.prompt || span.taskId || 'untitled task'}`, '');
     if (task.successHint) lines.push(`- Expected: ${task.successHint}`);
-    lines.push(`- Duration: ${formatDuration(active)}${paused ? ` (+${formatDuration(paused)} paused)` : ''}${span.ended ? '' : ' (not ended; session stopped)'}`);
+    lines.push(`- Status: ${taskStatus(span)}`);
+    lines.push(`- Duration: ${formatDuration(active)}${paused ? ` (+${formatDuration(paused)} paused)` : ''}`);
     if (task.timeLimit) {
       const over = active > task.timeLimit * 1000;
       lines.push(`- Time limit: ${formatDuration(task.timeLimit * 1000)}${over ? ` (exceeded by ${formatDuration(active - task.timeLimit * 1000)})` : ' (within)'}`);
@@ -377,6 +436,11 @@ export function buildSummary({ session = {}, log = [], events = [] } = {}) {
       signals.push(`- Long idle: ${formatDuration(idle.durationMs)} without logged interaction from ${clock(idle.start - span.start)}${idle.activity ? ' (pointer/scroll activity seen; likely reading)' : ''}`);
     }
     if (task.timeLimit && active > task.timeLimit * 1000) signals.push(`- Time limit exceeded: ${formatDuration(active)} vs ${formatDuration(task.timeLimit * 1000)}`);
+    for (const g of gaps.filter((gap) => gap.end > span.start && gap.start < span.end)) {
+      const from = Math.max(g.start, span.start);
+      const len = g.durationMs === null ? 'unknown length' : `${((Math.min(g.end, span.end) - from) / 1000).toFixed(1)}s`;
+      signals.push(`- Audio gap: ${len} from ${clock(from - span.start)}${g.reason ? ` (${g.reason})` : ''}`);
+    }
     if (errors.length) signals.push(`- Errors: ${errors.length}`);
     lines.push('', '### Signals', '', ...(signals.length ? signals : ['- none']), '');
   });
@@ -391,14 +455,18 @@ export function buildSummary({ session = {}, log = [], events = [] } = {}) {
   const outsideErrors = outside.filter((e) => ERROR_TYPES.has(e.type));
   lines.push(`- Errors outside tasks: ${outsideErrors.length || 'none'}`);
   for (const e of outsideErrors) lines.push(`  - ${formatTimestamp(e.ts)} ${e.type}: ${e.message || 'unknown error'} on ${shortUrl(e.url, baseUrl) || 'unknown page'}`);
-  const gaps = log.filter((e) => e.type === 'audio-gap');
   if (session.audio?.enabled === false) lines.push('- Audio: not recorded');
   else {
-    const gapTotal = gaps.reduce((sum, e) => sum + (gapMsOf(e) || 0), 0);
-    const unmeasured = gaps.filter((e) => gapMsOf(e) === null).length;
-    const detail = `${(gapTotal / 1000).toFixed(1)}s total${unmeasured ? `, ${unmeasured} without a measured length` : ''}`;
+    const gapTotal = gaps.reduce((sum, g) => sum + (g.durationMs || 0), 0);
+    const unmeasured = gaps.filter((g) => g.durationMs === null).length;
+    const detail = `${(gapTotal / 1000).toFixed(1)}s total${unmeasured ? `, ${unmeasured} without a measured length` : ''}; mm:ss from session start`;
+    if (Array.isArray(audio)) lines.push(`- Audio segments: ${audio.length}`);
     lines.push(`- Audio gaps: ${gaps.length ? `${gaps.length} (${detail})` : 'none'}`);
-    for (const e of gaps.filter((g) => g.message)) lines.push(`  - ${formatTimestamp(e.ts)} ${e.message}`);
+    for (const g of gaps.slice(0, 20)) {
+      const len = g.durationMs === null ? 'unknown length' : `${(g.durationMs / 1000).toFixed(1)}s`;
+      lines.push(`  - ${clock(g.start - start)}–${clock(g.end - start)} (${len})${g.reason ? ` ${g.reason}` : ''}`);
+    }
+    if (gaps.length > 20) lines.push(`  - … ${gaps.length - 20} more`);
   }
   const mutes = log.filter((e) => e.type === 'mute').length;
   if (mutes) lines.push(`- Muted: ${mutes}×`);

@@ -2,22 +2,25 @@
 // Casual viewers pay only for this file; the recorder (testkit-core.js) is
 // fetched from the same base URL only when testing is activated.
 
-const ACTIVE_KEY = 'testkit:active';
+// Per-study pointer written by testkit-core's store.js. Study normalization
+// must match normalizeConfig() in src/core/config.js.
+const ACTIVE_PREFIX = 'testkit:active:';
+const studyOf = (config) => String(config.study || 'untitled-study');
 const script = document.currentScript;
 const baseUrl = script?.src ? script.src.replace(/[^/]*(\?.*)?$/, '') : './';
 
-function readActive() {
+function readActive(study) {
   try {
-    return localStorage.getItem(ACTIVE_KEY);
+    return localStorage.getItem(ACTIVE_PREFIX + study);
   } catch {
     return null;
   }
 }
 
-function isActivated(activate) {
+function isActivated(activate, study) {
   const params = new URLSearchParams(location.search);
   if (params.get('test') === '0') return false;
-  if (readActive()) return true; // a session is in progress: survive navigation
+  if (readActive(study)) return true; // this study has a session in progress: survive navigation
   if (typeof activate === 'function') return !!activate();
   if (typeof activate === 'boolean') return activate;
   return params.get('test') === '1';
@@ -28,7 +31,7 @@ let initialized = false;
 function init(config = {}) {
   if (initialized) return;
   initialized = true;
-  if (!isActivated(config.activate ?? 'query')) return;
+  if (!isActivated(config.activate ?? 'query', studyOf(config))) return;
   const boot = () => window.__TestKitCore.boot(config, baseUrl);
   if (window.__TestKitCore) return boot();
   const el = document.createElement('script');

@@ -49,6 +49,6 @@ export async function buildPayload({ session = {}, events = [], log = [], audio 
     events,
     log,
     audio: await encodeAudio(audio),
-    summaryMarkdown: buildSummary({ session, log, events }),
+    summaryMarkdown: buildSummary({ session, log, events, audio }),
   };
 }

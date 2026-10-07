@@ -16,6 +16,9 @@ import { exportSession as buildExport } from '../export/exporter.js';
 
 const TICK_MS = 1000;
 const MAX_ANSWER = 1000;
+const CHANNEL = 'testkit';
+const PING_TIMEOUT_MS = 150;
+const OTHER_TAB_ERROR = 'Recording is active in another tab';
 
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -30,8 +33,10 @@ function snapshotConfig(config) {
   return JSON.parse(JSON.stringify(config, (key, value) => (typeof value === 'function' ? '[function]' : value)));
 }
 
-function download(filename, html) {
-  const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+// The exporter hands back a Blob assembled from parts (never one giant string).
+function download(filename, file) {
+  const blob = file instanceof Blob ? file : new Blob([file], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -54,6 +59,12 @@ export async function createController({ config, store }) {
   let audio = null;
   let ticker = null;
   let chain = Promise.resolve();
+  // Bumped whenever a session's lifecycle on this page ends or restarts, so
+  // background work (audio restore) started earlier can tell it's stale.
+  let generation = 0;
+  let owner = false; // this page is the one capturing session.id
+  let otherTab = false; // session.id is being captured by another tab
+  let channel = null;
 
   let state = idleState();
 
@@ -68,9 +79,15 @@ export async function createController({ config, store }) {
       taskStartedAt: null,
       muted: false,
       audio: { enabled: config.audio.enabled, status: 'off', error: null },
+      otherTab: false,
       error: null,
     };
   }
+
+  // Recording settings come from the session's saved config once it exists:
+  // a later page with a different local config must never change masking,
+  // audio or snapshot behaviour mid-session.
+  const captureConfig = () => (session?.config ? { ...config, ...session.config } : config);
 
   // -------------------------------------------------------------------------
   // State & subscribers
@@ -122,6 +139,11 @@ export async function createController({ config, store }) {
     return run;
   }
 
+  // Mutating API calls are inert in a tab that doesn't own the session.
+  function act(fn) {
+    return queue(() => (otherTab ? undefined : fn()));
+  }
+
   function startTicker() {
     if (!ticker) ticker = setInterval(emit, TICK_MS);
   }
@@ -132,6 +154,58 @@ export async function createController({ config, store }) {
   }
 
   store.onError?.((err) => set({ error: `Storage error: ${messageOf(err)}` }));
+
+  // -------------------------------------------------------------------------
+  // Tab ownership. A duplicated tab (or a second window) would otherwise
+  // resume the same session and interleave two DOM streams on one timeline.
+  // The capturing page answers pings; a resuming page that hears an answer
+  // stays passive.
+
+  function openChannel() {
+    if (channel || typeof BroadcastChannel === 'undefined') return channel;
+    try {
+      channel = new BroadcastChannel(CHANNEL);
+      channel.addEventListener('message', (e) => {
+        const m = e.data;
+        if (m?.type === 'ping' && owner && session?.id === m.id) channel?.postMessage({ type: 'pong', id: m.id, nonce: m.nonce });
+      });
+    } catch {
+      channel = null;
+    }
+    return channel;
+  }
+
+  function closeChannel() {
+    try {
+      channel?.close();
+    } catch {
+      // Already closed.
+    }
+    channel = null;
+  }
+
+  function capturedElsewhere(id) {
+    const ch = openChannel();
+    if (!ch) return Promise.resolve(false);
+    const nonce = newId();
+    return new Promise((resolve) => {
+      const finish = (answer) => {
+        clearTimeout(timer);
+        ch.removeEventListener('message', onMessage);
+        resolve(answer);
+      };
+      const onMessage = (e) => {
+        if (e.data?.type === 'pong' && e.data.nonce === nonce) finish(true);
+      };
+      const timer = setTimeout(() => finish(false), PING_TIMEOUT_MS);
+      ch.addEventListener('message', onMessage);
+      try {
+        ch.postMessage({ type: 'ping', id, nonce });
+      } catch {
+        finish(false);
+      }
+    });
+  }
 
   // -------------------------------------------------------------------------
   // Persistence helpers
@@ -155,7 +229,7 @@ export async function createController({ config, store }) {
   }
 
   function withMirror(rec) {
-    const mirror = store.getSessionMirror?.();
+    const mirror = rec && store.getSessionMirror?.(rec.id);
     if (!rec || mirror?.id !== rec.id || !(mirror.rev > (rec.rev || 0))) return rec;
     return { ...rec, ...mirror.fields, rev: mirror.rev };
   }
@@ -170,19 +244,27 @@ export async function createController({ config, store }) {
     recorder?.addCustomEvent(tag, payload);
   }
 
+  // Debounced inputs belong before any boundary marker that follows them.
+  function flushInputs() {
+    ilog?.flushPending();
+  }
+
   // Recorder and interaction log are bound to the session id, created once
   // per session per page.
   function attachCapture() {
     const id = session.id;
+    const cfg = captureConfig();
     recorder = createRecorder({
-      config,
+      config: cfg,
       onEvent: (event) => store.appendEvents(id, segmentId, [event]),
     });
     ilog = createInteractionLog({
-      mask: config.mask.inputs,
+      mask: cfg.mask.inputs,
       getTaskId: () => currentTask()?.id ?? null,
       onEntry: (entry) => store.appendLog(id, entry),
     });
+    owner = true;
+    openChannel();
   }
 
   function startCapture({ pageLoad = false } = {}) {
@@ -196,12 +278,15 @@ export async function createController({ config, store }) {
   }
 
   function detach() {
+    generation++;
     stopCapture();
     stopTicker();
     recorder = null;
     ilog = null;
     session = null;
     segmentId = null;
+    owner = false;
+    otherTab = false;
   }
 
   // -------------------------------------------------------------------------
@@ -210,7 +295,7 @@ export async function createController({ config, store }) {
   function ensureAudio() {
     if (audio) return audio;
     audio = createAudioCapture({
-      bitrate: config.audio.bitrate,
+      bitrate: captureConfig().audio.bitrate,
       onChunk: (chunk) => {
         if (session) store.appendAudio(session.id, chunk).catch(reportError);
       },
@@ -224,15 +309,32 @@ export async function createController({ config, store }) {
     return audio;
   }
 
-  async function acquireMic() {
-    ensureAudio();
+  const sessionWantsAudio = () =>
+    !!session && (state.phase === 'recording' || state.phase === 'paused') && !!session.audio?.enabled;
+
+  /**
+   * Acquires the mic. `isCurrent` lets background callers detect that the
+   * lifecycle moved on (stop/discard) while the prompt was open; a stream
+   * acquired for a stale caller is released unless a live session still
+   * wants it, and no status is published for it.
+   */
+  async function acquireMic(isCurrent = () => true) {
+    const a = ensureAudio();
     setAudio({ status: 'pending', error: null });
     try {
-      await audio.acquire();
-      audio.setMuted(state.muted);
+      await a.acquire();
+      if (!isCurrent()) {
+        if (!sessionWantsAudio() || audio !== a) {
+          if (audio === a) audio = null;
+          await a.release();
+        }
+        return { ok: false, stale: true };
+      }
+      a.setMuted(state.muted);
       setAudio({ status: state.muted ? 'muted' : 'live', error: null });
       return { ok: true };
     } catch (err) {
+      if (!isCurrent()) return { ok: false, stale: true };
       const { status, error } = err?.name === 'AbortError' ? { status: 'off', error: null } : micErrorStatus(err);
       setAudio({ status, error });
       return { ok: false, error: error || messageOf(err) };
@@ -259,12 +361,20 @@ export async function createController({ config, store }) {
 
   // After a navigation the previous page's recorder is gone. Re-acquire the
   // mic without blocking boot (Safari may re-prompt) and log the silence.
+  // Every await is followed by a staleness check: Stop or Discard may have
+  // happened meanwhile, and must never be followed by a live microphone.
   async function restartAudioAfterNavigation() {
+    const gen = generation;
     const id = session.id;
+    const isCurrent = () => gen === generation && session?.id === id && (state.phase === 'recording' || state.phase === 'paused');
     const last = await store.lastAudioChunk?.(id).catch(() => null);
-    const res = await acquireMic();
-    if (session?.id !== id) return; // discarded meanwhile
-    const gapStart = last?.ts ?? null;
+    if (!isCurrent()) return;
+    // With no stored chunk (e.g. the previous page's audio never persisted),
+    // the gap runs from the previous page's start, else the session start.
+    const segments = session.segments || [];
+    const gapStart = last?.ts ?? segments[segments.length - 2]?.startedAt ?? session.startedAt;
+    const res = await acquireMic(isCurrent);
+    if (!isCurrent() || res.stale) return;
     if (!res.ok) {
       // Don't re-prompt on every page once the tester has said no.
       if (state.audio.status === 'denied') persist({ audio: { ...session.audio, enabled: false } });
@@ -272,7 +382,7 @@ export async function createController({ config, store }) {
       return;
     }
     if (state.phase !== 'recording') return; // resume() starts the segment
-    if (startAudioSegment() && gapStart) log('audio-gap', { gapStart, gapMs: Date.now() - gapStart });
+    if (startAudioSegment()) log('audio-gap', { gapStart, gapMs: Math.max(0, Date.now() - gapStart) });
   }
 
   // -------------------------------------------------------------------------
@@ -289,11 +399,13 @@ export async function createController({ config, store }) {
     return saved;
   }
 
-  function endTask() {
+  // `completed` separates finishing a task (Next) from the span merely
+  // ending because the session was stopped.
+  function endTask({ completed }) {
     const task = currentTask();
     if (!task) return;
-    log('task-end', { taskId: task.id });
-    mark('testkit:task-end', { taskId: task.id, index: session.taskIndex });
+    log('task-end', { taskId: task.id, completed });
+    mark('testkit:task-end', { taskId: task.id, index: session.taskIndex, completed });
   }
 
   // -------------------------------------------------------------------------
@@ -310,11 +422,22 @@ export async function createController({ config, store }) {
       taskStartedAt: phase === 'stopped' ? null : session.taskStartedAt ?? null,
       muted: !!session.muted,
       audio: { enabled: !!session.audio?.enabled, status: 'off', error: null },
+      otherTab: false,
       error: null,
     };
   }
 
   async function resumeSession(rec) {
+    generation++;
+    if (await capturedElsewhere(rec.id)) {
+      // Show the session read-only; never write to it from this tab.
+      session = rec;
+      otherTab = true;
+      state = { ...stateFromSession(rec.phase), otherTab: true, error: OTHER_TAB_ERROR };
+      emit();
+      return;
+    }
+    otherTab = false;
     session = rec;
     segmentId = newId();
     const segments = [...(rec.segments || []), { segmentId, url: location.href, startedAt: Date.now() }];
@@ -326,7 +449,7 @@ export async function createController({ config, store }) {
       startCapture({ pageLoad: true });
       log('session-resume', {});
       startTicker();
-      if (config.audio.enabled && session.audio?.enabled) {
+      if (captureConfig().audio.enabled && session.audio?.enabled) {
         restartAudioAfterNavigation().catch(reportError);
       }
     } else {
@@ -336,24 +459,29 @@ export async function createController({ config, store }) {
     emit();
   }
 
+  async function loadActive() {
+    const activeId = store.getActiveSessionId?.(config.study);
+    if (!activeId) return null;
+    const rec = withMirror(await store.getSession(activeId).catch(() => null));
+    if (rec && rec.study === config.study && (rec.phase === 'recording' || rec.phase === 'paused')) return rec;
+    store.clearActiveSessionId?.(config.study);
+    return null;
+  }
+
   async function bootFromStore() {
-    const activeId = store.getActiveSessionId?.();
-    if (activeId) {
-      const rec = withMirror(await store.getSession(activeId).catch(() => null));
-      if (rec && (rec.phase === 'recording' || rec.phase === 'paused')) return resumeSession(rec);
-      store.clearActiveSessionId?.();
-    }
+    const active = await loadActive();
+    if (active) return resumeSession(active);
     // A stopped-but-not-discarded session stays exportable across reloads.
-    const lastId = store.getLastSessionId?.();
+    const lastId = store.getLastSessionId?.(config.study);
     if (lastId) {
       const rec = withMirror(await store.getSession(lastId).catch(() => null));
-      if (rec?.phase === 'stopped') {
+      if (rec?.phase === 'stopped' && rec.study === config.study) {
         session = rec;
         state = stateFromSession('stopped');
         emit();
         return;
       }
-      store.clearLastSessionId?.();
+      store.clearLastSessionId?.(config.study);
     }
   }
 
@@ -363,18 +491,39 @@ export async function createController({ config, store }) {
   window.addEventListener(
     'pagehide',
     () => {
-      if (!session || state.phase !== 'recording') return;
       try {
-        ilog?.flushPending();
-        // Best effort: the final chunk is written only if the page lives long enough.
-        audio?.stopSegment();
-        store.flush?.();
+        if (session && state.phase === 'recording' && owner) {
+          flushInputs();
+          // Best effort: the final chunk is written only if the page lives long enough.
+          audio?.stopSegment();
+          store.flush?.();
+        }
+        // A page entering bfcache must not answer pings for a session it no
+        // longer captures; pageshow re-establishes ownership.
+        owner = false;
+        closeChannel();
       } catch {
         // Unloading; nothing useful left to do.
       }
     },
     { capture: true },
   );
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      // Hidden usually precedes pagehide: get buffered audio out while the page can still write it.
+      if (owner && state.phase === 'recording') audio?.requestData();
+      return;
+    }
+    // A passive tab whose owner went away takes over when the tester returns to it.
+    if (otherTab && session) {
+      queue(async () => {
+        if (!otherTab || !session) return;
+        const rec = withMirror(await store.getSession(session.id).catch(() => null));
+        if (rec && (rec.phase === 'recording' || rec.phase === 'paused')) await resumeSession(rec);
+      });
+    }
+  });
 
   // Restored from bfcache: another page may have advanced (or stopped) the
   // session meanwhile, so re-read it rather than trusting memory.
@@ -413,7 +562,7 @@ export async function createController({ config, store }) {
     },
 
     beginPreflight() {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'idle' && state.phase !== 'stopped') return;
         // Leaving 'stopped' keeps that session's data until it's discarded.
         session = null;
@@ -422,7 +571,7 @@ export async function createController({ config, store }) {
     },
 
     cancelPreflight() {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'preflight') return;
         await releaseAudio();
         set(idleState());
@@ -435,7 +584,7 @@ export async function createController({ config, store }) {
       if (!config.audio.enabled) return { ok: false, error: 'Audio is disabled for this study' };
       if (state.phase !== 'preflight') return { ok: false, error: 'Not in preflight' };
       try {
-        return await acquireMic();
+        return await acquireMic(() => state.phase === 'preflight');
       } catch (err) {
         reportError(err);
         return { ok: false, error: messageOf(err) };
@@ -447,7 +596,7 @@ export async function createController({ config, store }) {
     },
 
     start({ consent, audio: wantAudio = true } = {}) {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'preflight') return;
         if (consent !== true) {
           set({ error: 'Consent is required before recording' });
@@ -455,7 +604,7 @@ export async function createController({ config, store }) {
         }
         const consentAt = Date.now();
         const useAudio = config.audio.enabled && wantAudio !== false;
-        if (useAudio && !audio?.isLive()) await acquireMic();
+        if (useAudio && !audio?.isLive()) await acquireMic(() => state.phase === 'preflight');
         if (!useAudio) {
           await releaseAudio();
           setAudio({ enabled: false, status: 'off', error: null });
@@ -464,6 +613,7 @@ export async function createController({ config, store }) {
         const audioOk = useAudio && !!audio?.isLive();
         const now = Date.now();
         const tasks = config.tasks;
+        generation++;
         segmentId = newId();
         session = {
           id: newId(),
@@ -491,8 +641,8 @@ export async function createController({ config, store }) {
           tasksCompleted: 0,
         };
         await store.createSession(session);
-        store.setActiveSessionId?.(session.id);
-        store.clearLastSessionId?.();
+        store.setActiveSessionId?.(session.study, session.id);
+        store.clearLastSessionId?.(session.study);
         attachCapture();
         state = {
           ...stateFromSession('recording'),
@@ -511,13 +661,14 @@ export async function createController({ config, store }) {
     },
 
     nextTask({ followUpAnswer } = {}) {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'recording') return;
+        flushInputs();
         const task = currentTask();
         if (task && followUpAnswer != null && String(followUpAnswer).trim()) {
           log('followup', { taskId: task.id, text: clip(task.followUp || ''), answer: String(followUpAnswer).trim().slice(0, MAX_ANSWER) });
         }
-        endTask();
+        endTask({ completed: true });
         const counted = persist({ tasksCompleted: (session.tasksCompleted || 0) + 1 });
         const next = session.taskIndex + 1;
         if (next < session.tasks.length) await Promise.all([counted, beginTask(next)]);
@@ -526,9 +677,10 @@ export async function createController({ config, store }) {
     },
 
     pause() {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'recording') return;
         const now = Date.now();
+        flushInputs();
         // Mark before stopping rrweb so the marker lands in the stream.
         mark('testkit:pause', {});
         log('pause', {});
@@ -541,7 +693,7 @@ export async function createController({ config, store }) {
     },
 
     resume() {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'paused') return;
         const now = Date.now();
         const pausedFor = session.pausedAt ? now - session.pausedAt : 0;
@@ -557,18 +709,19 @@ export async function createController({ config, store }) {
         mark('testkit:resume', {});
         log('resume', {});
         startTicker();
-        if (config.audio.enabled && session.audio?.enabled) {
+        if (captureConfig().audio.enabled && session.audio?.enabled) {
+          const gen = generation;
           if (!audio?.isLive()) {
-            const res = await acquireMic();
-            if (!res.ok) log('audio-gap', { gapStart: now, gapMs: null, message: `Microphone unavailable: ${res.error}` });
+            const res = await acquireMic(() => gen === generation && state.phase === 'recording');
+            if (!res.ok && !res.stale) log('audio-gap', { gapStart: now, gapMs: null, message: `Microphone unavailable: ${res.error}` });
           }
-          if (state.phase === 'recording') startAudioSegment();
+          if (gen === generation && state.phase === 'recording') startAudioSegment();
         }
       });
     },
 
     toggleMute() {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'recording' && state.phase !== 'paused') return;
         const muted = !state.muted;
         audio?.setMuted(muted);
@@ -581,19 +734,20 @@ export async function createController({ config, store }) {
     },
 
     stop() {
-      return queue(() => doStop());
+      return act(() => doStop());
     },
 
     // Resolves with { filename, bytes }; rejects on failure (the message is
     // also put in state.error), so callers must handle the rejection.
     exportSession() {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase !== 'stopped' || !session) return { error: 'No stopped session to export' };
         set({ phase: 'exporting', error: null });
         try {
           const data = await store.loadSessionData(session.id);
-          const { filename, html, bytes } = await buildExport(data);
-          download(filename, html);
+          const { filename, blob, html, bytes } = await buildExport(data);
+          if (!blob && typeof html !== 'string') throw new Error('Exporter returned no file');
+          download(filename, blob ?? html);
           set({ phase: 'stopped' });
           return { filename, bytes };
         } catch (err) {
@@ -609,16 +763,17 @@ export async function createController({ config, store }) {
     },
 
     discard() {
-      return queue(async () => {
+      return act(async () => {
         if (state.phase === 'idle') return;
         const id = session?.id;
+        const study = session?.study ?? config.study;
+        detach(); // invalidates pending restore work before anything is awaited
         await releaseAudio();
-        detach();
         if (id) {
           await store.deleteSession(id);
-          if (store.getActiveSessionId?.() === id) store.clearActiveSessionId?.();
-          if (store.getLastSessionId?.() === id) store.clearLastSessionId?.();
-          if (store.getSessionMirror?.()?.id === id) store.clearSessionMirror?.();
+          if (store.getActiveSessionId?.(study) === id) store.clearActiveSessionId?.(study);
+          if (store.getLastSessionId?.(study) === id) store.clearLastSessionId?.(study);
+          store.clearSessionMirror?.(id);
         }
         set(idleState());
       });
@@ -627,19 +782,24 @@ export async function createController({ config, store }) {
 
   async function doStop({ taskEnded = false } = {}) {
     if (state.phase !== 'recording' && state.phase !== 'paused') return;
+    generation++; // cancels a pending audio restore
     const now = Date.now();
     const wasRecording = state.phase === 'recording';
-    if (!taskEnded) endTask();
+    flushInputs();
+    if (!taskEnded) endTask({ completed: false });
     log('session-end', {});
     if (wasRecording) mark('testkit:session-end', {});
     stopCapture();
     stopTicker();
+    owner = false;
     await releaseAudio();
     const pausedMs = (session.pausedMs || 0) + (session.pausedAt ? now - session.pausedAt : 0);
     await persist({ phase: 'stopped', endedAt: now, pausedAt: null, pausedMs, taskStartedAt: null });
     await store.flush?.();
-    store.clearActiveSessionId?.();
-    store.setLastSessionId?.(session.id);
+    store.clearActiveSessionId?.(session.study);
+    store.setLastSessionId?.(session.study, session.id);
+    // IndexedDB now holds the final record; the mirror would only go stale.
+    store.clearSessionMirror?.(session.id);
     set({ phase: 'stopped', taskStartedAt: null, audio: { ...state.audio, status: 'off' } });
   }
 

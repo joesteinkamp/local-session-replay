@@ -126,7 +126,9 @@ function installConsoleHook() {
 export function createInteractionLog({ mask = true, getTaskId = () => null, onEntry }) {
   let active = false;
   let currentUrl = typeof location !== 'undefined' ? location.href : '';
-  const pendingInputs = new Map(); // element → timeout id
+  // element → { timer, fields }. Fields (ts, url, taskId, masked value) are
+  // captured at event time so a debounced entry can't drift into the next task.
+  const pendingInputs = new Map();
   const recentErrors = new Map(); // message → ts
   let pendingPop = null; // { timer, from, to }
 
@@ -141,16 +143,28 @@ export function createInteractionLog({ mask = true, getTaskId = () => null, onEn
     log('nav', { navType, from, to });
   }
 
+  function inputFields(el, previous) {
+    return {
+      ts: Date.now(),
+      url: safe(() => location.href) ?? '',
+      taskId: safe(getTaskId) ?? null,
+      // Selector/label don't change while typing; compute them once per burst.
+      selector: previous ? previous.selector : selectorFor(el),
+      text: previous ? previous.text : labelFor(el, { mask }),
+      value: inputValue(el, mask), // masked before it's retained
+    };
+  }
+
   function logInput(type, el) {
-    log(type, { selector: selectorFor(el), text: labelFor(el, { mask }), value: inputValue(el, mask) });
+    log(type, inputFields(el));
   }
 
   function flushInput(el) {
-    const timer = pendingInputs.get(el);
-    if (timer === undefined) return;
-    clearTimeout(timer);
+    const pending = pendingInputs.get(el);
+    if (!pending) return;
+    clearTimeout(pending.timer);
     pendingInputs.delete(el);
-    logInput('input', el);
+    log('input', pending.fields);
   }
 
   function flushPending() {
@@ -190,11 +204,12 @@ export function createInteractionLog({ mask = true, getTaskId = () => null, onEn
       const el = realTarget(e);
       // Toggles and selects are logged once, on 'change'.
       if (!isTextField(el)) return;
-      clearTimeout(pendingInputs.get(el));
-      pendingInputs.set(
-        el,
-        setTimeout(() => safe(() => flushInput(el)), INPUT_DEBOUNCE_MS),
-      );
+      const previous = pendingInputs.get(el);
+      clearTimeout(previous?.timer);
+      pendingInputs.set(el, {
+        fields: inputFields(el, previous?.fields),
+        timer: setTimeout(() => safe(() => flushInput(el)), INPUT_DEBOUNCE_MS),
+      });
     },
     change(e) {
       if (fromOverlay(e)) return;

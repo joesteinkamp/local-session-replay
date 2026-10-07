@@ -6,6 +6,7 @@ const DEFAULTS = {
   audio: { enabled: true, bitrate: 32000 },
   mask: { inputs: true },
   checkoutEveryNms: 60000,
+  inlineImages: true,
   commitSha: null,
   tasks: [],
 };
@@ -28,6 +29,7 @@ export function normalizeConfig(user = {}) {
     },
     mask: { inputs: user.mask?.inputs ?? DEFAULTS.mask.inputs },
     checkoutEveryNms: Number(user.checkoutEveryNms) || DEFAULTS.checkoutEveryNms,
+    inlineImages: typeof user.inlineImages === 'boolean' ? user.inlineImages : DEFAULTS.inlineImages,
     commitSha: user.commitSha || metaCommit(),
     tasks: tasks.map((t, i) => ({
       id: String(t.id ?? `task-${i + 1}`),

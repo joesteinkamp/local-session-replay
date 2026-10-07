@@ -5,9 +5,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const out = path.join(root, 'public', 'v1');
 const watch = process.argv.includes('--watch');
 const { version } = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+// Output path follows the major version (/v1/, /v2/, …) so a breaking release
+// never overwrites the path existing prototypes load.
+const out = path.join(root, 'public', `v${version.split('.')[0]}`);
 
 const common = {
   bundle: true,
@@ -36,11 +38,22 @@ const playerBundlePlugin = {
   },
 };
 
+// Prototype pages may not declare a charset, so the bundles must be pure ASCII:
+// esbuild escapes non-ASCII in strings but not inside regex literals.
+async function assertAscii(files) {
+  for (const file of files) {
+    const buf = await readFile(file);
+    const at = buf.findIndex((b) => b > 127);
+    if (at !== -1) throw new Error(`${path.relative(root, file)} contains a non-ASCII byte at offset ${at}; escape it in the source (e.g. \\u0300)`);
+  }
+}
+
 async function buildAll() {
   await mkdir(out, { recursive: true });
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/player/player.js')], outfile: path.join(out, 'testkit-player.js') });
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/core/index.js')], outfile: path.join(out, 'testkit-core.js'), plugins: [playerBundlePlugin] });
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/loader.js')], outfile: path.join(out, 'testkit.js') });
+  await assertAscii([path.join(out, 'testkit.js'), path.join(out, 'testkit-core.js'), path.join(out, 'testkit-player.js')]);
   await rm(path.join(root, 'public', 'demo'), { recursive: true, force: true });
   await cp(path.join(root, 'demo'), path.join(root, 'public', 'demo'), { recursive: true });
 }

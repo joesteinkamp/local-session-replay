@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildSummary, buildTaskSpans, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
+  audioGaps, buildSummary, buildTaskSpans, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
   detectRageClicks, formatDuration, formatTrailLine, overlapMs, pausedSpans, shortUrl,
 } from '../src/export/summary.js';
 
@@ -278,7 +278,7 @@ test('buildSummary: unreached tasks and session-level section', () => {
   assert.ok(md.includes('## Tasks not reached\n\n- never: Checkout'));
   assert.ok(md.includes('- Errors outside tasks: 1'));
   assert.ok(md.includes('rejection: Unhandled: nope'));
-  assert.ok(md.includes('- Audio gaps: 1 (1.2s total)'));
+  assert.ok(md.includes('- Audio gaps: 1 (1.2s total; mm:ss from session start)'));
   assert.ok(md.includes('- Pauses: 1 (00:18 total)'));
 });
 
@@ -304,7 +304,8 @@ test('buildSummary: survives empty and minimal input', () => {
 test('buildSummary: unfinished task is marked', () => {
   const session = { study: 's', startedAt: at(0), endedAt: at(50), tasks: [{ id: 't', prompt: 'P' }] };
   const md = buildSummary({ session, log: [{ ts: at(1), type: 'task-start', taskId: 't' }, { ts: at(50), type: 'session-end', taskId: null }] });
-  assert.ok(md.includes('- Duration: 00:49 (not ended; session stopped)'));
+  assert.ok(md.includes('- Status: Not completed (session stopped)'));
+  assert.ok(md.includes('- Duration: 00:49'));
   assert.ok(md.includes('(no interactions recorded)'));
 });
 
@@ -313,6 +314,90 @@ test('audio-gap entries from the core: gapMs may be null and carry a message', (
     '00:03 audio-gap "Microphone unavailable: denied"');
   const session = { study: 's', startedAt: at(0), endedAt: at(10), audio: { enabled: true } };
   const md = buildSummary({ session, log: [{ ts: at(2), type: 'audio-gap', gapMs: null, message: 'Microphone unavailable: denied' }] });
-  assert.ok(md.includes('- Audio gaps: 1 (0.0s total, 1 without a measured length)'));
+  assert.ok(md.includes('- Audio gaps: 1 (0.0s total, 1 without a measured length; mm:ss from session start)'));
   assert.ok(md.includes('Microphone unavailable: denied'));
+});
+
+test('buildTaskSpans: completed comes from task-end.completed (Stop mid-task is not completed)', () => {
+  const session = { tasks: [{ id: 't1', prompt: 'One' }, { id: 't2', prompt: 'Two' }], startedAt: at(0), endedAt: at(30), tasksCompleted: 0 };
+  const log = [
+    { ts: at(1), type: 'task-start', taskId: 't1' },
+    { ts: at(10), type: 'task-end', taskId: 't1', completed: true },
+    { ts: at(11), type: 'task-start', taskId: 't2' },
+    { ts: at(20), type: 'task-end', taskId: 't2', completed: false },
+    { ts: at(20), type: 'session-end', taskId: null },
+  ];
+  const spans = buildTaskSpans({ session, log });
+  assert.deepEqual(spans.map((sp) => [sp.taskId, sp.ended, sp.completed]), [['t1', true, true], ['t2', true, false]]);
+  const md = buildSummary({ session, log });
+  assert.ok(md.includes('- Tasks completed: 1 of 2'));
+  const task2 = md.slice(md.indexOf('## Task 2'));
+  assert.ok(task2.includes('- Status: Not completed (session stopped)'));
+  assert.ok(md.slice(md.indexOf('## Task 1'), md.indexOf('## Task 2')).includes('- Status: Completed'));
+});
+
+test('buildTaskSpans: without the flag, falls back to session.tasksCompleted', () => {
+  // The controller's Stop path: task-start, task-end, session-end, nothing completed.
+  const log = [
+    { ts: at(1), type: 'task-start', taskId: 't1' },
+    { ts: at(5), type: 'task-end', taskId: 't1' },
+    { ts: at(5), type: 'session-end', taskId: null },
+  ];
+  const session = { tasks: [{ id: 't1', prompt: 'One' }], startedAt: at(0), endedAt: at(5), tasksCompleted: 0 };
+  assert.equal(buildTaskSpans({ session, log })[0].completed, false);
+  assert.ok(buildSummary({ session, log }).includes('- Tasks completed: 0 of 1'));
+  assert.equal(buildTaskSpans({ session: { ...session, tasksCompleted: 1 }, log })[0].completed, true);
+  // Legacy data with neither field: an ended task counts as completed.
+  const { tasksCompleted, ...legacy } = session;
+  assert.equal(buildTaskSpans({ session: legacy, log })[0].completed, true);
+});
+
+test('buildTaskSpans: completed flag is read from rrweb custom events too', () => {
+  const events = [
+    { type: 5, timestamp: at(1), data: { tag: 'testkit:task-start', payload: { taskId: 't1', index: 0 } } },
+    { type: 5, timestamp: at(9), data: { tag: 'testkit:task-end', payload: { taskId: 't1', index: 0, completed: false } } },
+  ];
+  assert.equal(buildTaskSpans({ session: { tasks: [{ id: 't1' }] }, log: [], events })[0].completed, false);
+});
+
+test('audioGaps: computed from coverage, excluding pauses and sub-threshold slivers', () => {
+  const audio = [{ startTs: at(10), endTs: at(20) }, { startTs: at(20.2), endTs: at(40) }, { startTs: at(60), endTs: at(70) }];
+  const pauses = [{ start: at(40), end: at(55) }];
+  const gaps = audioGaps({ session: { audio: { enabled: true } }, log: [], audio, start: at(0), end: at(80), pauses });
+  assert.deepEqual(gaps.map((g) => [g.start, g.end, g.durationMs]), [
+    [at(0), at(10), 10000], [at(55), at(60), 5000], [at(70), at(80), 10000],
+  ]);
+});
+
+test('audioGaps: one segment covering only the middle page yields gaps on both sides', () => {
+  const md = buildSummary({
+    session: { study: 's', startedAt: at(0), endedAt: at(90), audio: { enabled: true } },
+    log: [],
+    audio: [{ startTs: at(30), endTs: at(60) }],
+  });
+  assert.ok(md.includes('- Audio segments: 1'));
+  assert.ok(md.includes('- Audio gaps: 2 (60.0s total'), md);
+  assert.ok(md.includes('  - 00:00–00:30 (30.0s)'));
+  assert.ok(md.includes('  - 01:00–01:30 (30.0s)'));
+});
+
+test('audioGaps: no segments at all while enabled is one whole-session gap; reasons come from the log', () => {
+  const log = [{ ts: at(1), type: 'audio-gap', gapStart: at(0), gapMs: null, message: 'Microphone unavailable: denied' }];
+  const gaps = audioGaps({ session: { audio: { enabled: true } }, log, audio: [], start: at(0), end: at(30) });
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0].durationMs, 30000);
+  assert.equal(gaps[0].reason, 'Microphone unavailable: denied');
+});
+
+test('audioGaps: disabled audio has no gaps; without segments falls back to logged entries', () => {
+  assert.deepEqual(audioGaps({ session: { audio: { enabled: false } }, audio: [], start: at(0), end: at(10) }), []);
+  const logged = audioGaps({ session: {}, log: [{ ts: at(5), type: 'audio-gap', gapStart: at(3), gapMs: 2000 }] });
+  assert.deepEqual(logged, [{ start: at(3), end: at(5), durationMs: 2000, reason: null }]);
+});
+
+test('buildSummary: per-task audio gap signal from coverage', () => {
+  const session = { study: 's', startedAt: at(0), endedAt: at(40), tasks: [{ id: 't', prompt: 'P' }], audio: { enabled: true } };
+  const log = [{ ts: at(1), type: 'task-start', taskId: 't' }, { ts: at(40), type: 'task-end', taskId: 't', completed: true }];
+  const md = buildSummary({ session, log, audio: [{ startTs: at(0), endTs: at(20) }, { startTs: at(22), endTs: at(40) }] });
+  assert.ok(md.includes('- Audio gap: 2.0s from 00:19'), md);
 });

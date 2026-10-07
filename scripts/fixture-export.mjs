@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import { buildPayload } from '../src/export/payload.js';
-import { buildFilename, buildHtml, byteLength } from '../src/export/html.js';
+import { buildFilename, buildHtmlBlob } from '../src/export/html.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = path.resolve(process.argv[2] || path.join(os.tmpdir(), 'testkit-fixture'));
@@ -39,7 +39,9 @@ const CSS = `body{font:16px/1.5 system-ui,sans-serif;margin:0;background:#fafafa
 header{background:#1e3a8a;color:#fff;padding:16px 32px}main{padding:32px;max-width:720px}
 label{display:block;margin:16px 0 4px}input{font:inherit;padding:8px;width:280px;border:1px solid #888;border-radius:6px}
 button{font:inherit;padding:8px 16px;margin-top:12px;border:0;border-radius:6px;background:#2563eb;color:#fff}
-ul{padding-left:20px}li{margin:6px 0}a{color:#1d4ed8}`;
+ul{padding-left:20px}li{margin:6px 0}a{color:#1d4ed8}
+@font-face{font-family:Brand;src:url(https://fonts.example.com/brand.woff2) format('woff2')}
+header{background-image:url("https://cdn.example.com/hero.png")}`;
 
 function page(title, bodyChildren) {
   nextId = 1;
@@ -47,7 +49,10 @@ function page(title, bodyChildren) {
   const docId = nextId++;
   const doctype = { type: 1, name: 'html', publicId: '', systemId: '', id: nextId++ };
   const styleText = text(CSS);
-  const head = el('head', {}, [el('meta', { charset: 'utf-8' }), el('title', {}, [text(title)]), el('style', {}, [styleText])]);
+  styleText.isStyle = true;
+  // Remote assets the recorder could not inline; the export must not fetch them.
+  const head = el('head', {}, [el('meta', { charset: 'utf-8' }), el('title', {}, [text(title)]), el('style', {}, [styleText]),
+    el('link', { rel: 'stylesheet', href: 'https://cdn.example.com/theme.css' })]);
   const body = el('body', {}, bodyChildren(ids));
   const html = el('html', { lang: 'en' }, [head, body]);
   return { node: { type: 0, childNodes: [doctype, html], id: docId }, ids };
@@ -71,6 +76,7 @@ function indexPage() {
         apply,
         results,
         el('ul', {}, ['Trail Shell', 'Down Parka', 'Rain Jacket'].map((t) => el('li', {}, [text(t)]))),
+        el('img', { src: 'https://example.com/x.png', alt: 'Featured jacket', width: '120', height: '80' }),
         el('p', {}, [aboutLink]),
       ]),
     ];
@@ -118,7 +124,7 @@ click(20.3, p1.ids.apply, 213, 270);
 click(20.6, p1.ids.apply, 211, 272);
 // Reading: pointer drifts, nothing logged, so the summary flags idle with activity.
 for (let s = 22; s < 48; s += 1) move(s, p1.ids.resultText, 220 + (s % 7) * 30, 300 + (s % 5) * 20);
-custom(55, 'testkit:task-end', { taskId: 'find-jacket', index: 0 });
+custom(55, 'testkit:task-end', { taskId: 'find-jacket', index: 0, completed: true });
 custom(56, 'testkit:pause');
 custom(70, 'testkit:resume');
 custom(71, 'testkit:task-start', { taskId: 'about', index: 1, prompt: 'Find out where Acme is based' });
@@ -135,7 +141,7 @@ const p3 = indexPage();
 meta(85, BASE);
 full(85.01, p3.node);
 for (let s = 85.5; s < 88; s += 0.5) move(s, p3.ids.apply, 400, 300 + s);
-custom(88, 'testkit:task-end', { taskId: 'about', index: 1 });
+custom(88, 'testkit:task-end', { taskId: 'about', index: 1, completed: false });
 custom(90, 'testkit:session-end');
 
 // ---------- log ----------
@@ -155,7 +161,7 @@ const log = [
   L(20.3, 'click', { ...t1, selector: 'button#apply', text: 'Apply', x: 213, y: 270 }),
   L(20.6, 'click', { ...t1, selector: 'button#apply', text: 'Apply', x: 211, y: 272 }),
   L(21, 'error', { ...t1, message: 'TypeError: Cannot read properties of undefined (reading \'price\')', stack: 'TypeError: Cannot read properties of undefined (reading \'price\')\n    at applyFilter (app.js:42:17)' }),
-  L(55, 'task-end', t1),
+  L(55, 'task-end', { ...t1, completed: true }),
   L(55.5, 'followup', { ...t1, answer: 'The filter said zero results even though I could see rain jackets. Confusing.' }),
   L(56, 'pause'),
   L(70, 'resume'),
@@ -163,11 +169,12 @@ const log = [
   L(72, 'click', { ...t2, selector: 'main > p > a', text: 'About this store', x: 260, y: 525 }),
   L(72.2, 'nav', { ...t2, navType: 'beforeunload', from: BASE, to: null }),
   L(73, 'nav', { ...t2, navType: 'load', from: BASE, to: `${BASE}about.html` }),
-  L(74, 'audio-gap', { ...t2, gapMs: 1500 }),
+  L(73.7, 'audio-gap', { ...t2, gapStart: at(72.2), gapMs: 1500 }),
   L(84, 'click', { ...t2, selector: 'main > p > a', text: 'Back to products', x: 330, y: 250 }),
   L(84.2, 'nav', { ...t2, navType: 'beforeunload', from: `${BASE}about.html`, to: null }),
   L(85, 'nav', { ...t2, navType: 'load', from: `${BASE}about.html`, to: BASE }),
-  L(88, 'task-end', t2),
+  // Stop pressed mid-task: the span ends but the task is not completed.
+  L(88, 'task-end', { ...t2, completed: false }),
   L(89, 'error', { message: 'ResizeObserver loop completed with undelivered notifications.' }),
   L(90, 'session-end'),
 ];
@@ -211,6 +218,7 @@ const session = {
   endedAt: at(90),
   phase: 'stopped',
   taskIndex: 1,
+  tasksCompleted: 1,
   tasks,
   config: { study: 'Checkout Flow — Round 2', tasks },
   meta: {
@@ -231,8 +239,9 @@ const session = {
 
 events.sort((a, b) => a.timestamp - b.timestamp);
 const payload = await buildPayload({ session, events, log, audio }, { testkitVersion: 'fixture' });
-const html = buildHtml({ payload, playerJs });
+// Same Blob path the exporter uses in the browser.
+const { blob } = buildHtmlBlob({ payload, playerJs });
 const file = path.join(outDir, buildFilename(session));
-await writeFile(file, html);
+await writeFile(file, Buffer.from(await blob.arrayBuffer()));
 await writeFile(path.join(outDir, 'summary.md'), payload.summaryMarkdown);
-console.log(`${file} (${(byteLength(html) / 1024).toFixed(0)} KB)`);
+console.log(`${file} (${(blob.size / 1024).toFixed(0)} KB)`);

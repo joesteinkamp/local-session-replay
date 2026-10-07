@@ -4,6 +4,10 @@
 import { record } from 'rrweb';
 
 const BLOCK_CLASS = 'testkit-block';
+// rrweb's maskAllInputs covers form controls only; rich-text editors are
+// plain DOM text. rrweb checks ancestors (closest()) for both snapshot text
+// and characterData mutations, so this masks nested editable content too.
+export const EDITABLE_SELECTOR = '[contenteditable]:not([contenteditable="false"])';
 
 /**
  * @param {object} opts
@@ -34,10 +38,15 @@ export function createRecorder({ config, onEvent }) {
             }
           },
           maskAllInputs: config.mask.inputs,
+          maskTextSelector: config.mask.inputs ? EDITABLE_SELECTOR : undefined,
           blockClass: BLOCK_CLASS,
           checkoutEveryNms: config.checkoutEveryNms,
           inlineStylesheet: true,
-          inlineImages: true,
+          // Caveat (rrweb 2.1.7): when a cross-origin <img> taints the canvas,
+          // rrweb sets crossOrigin='anonymous' on the live element and reloads
+          // it, which can break images served without CORS headers. Studies
+          // with such images should set inlineImages: false.
+          inlineImages: config.inlineImages !== false,
           collectFonts: true,
           recordCanvas: false,
           sampling: { input: 'last' },

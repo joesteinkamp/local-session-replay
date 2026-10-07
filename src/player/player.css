@@ -576,3 +576,14 @@ kbd {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ---- Notices ---- */
+
+.tk-notice {
+  margin: var(--tk-space-3) 0 0;
+  padding: var(--tk-space-2) var(--tk-space-3);
+  font-size: 13px;
+  color: var(--tk-warn);
+  background: var(--tk-warn-soft);
+  border-radius: var(--tk-radius-sm);
+}

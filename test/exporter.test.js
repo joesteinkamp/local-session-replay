@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildFilename, buildHtml, byteLength, escapeHtml, escapeInlineScript, fileStamp, serializePayload, slugify,
+  buildFilename, buildHtml, buildHtmlBlob, byteLength, escapeHtml, escapeInlineScript, escapeJson, fileStamp, htmlParts,
+  payloadParts, serializePayload, slugify,
 } from '../src/export/html.js';
 import { blobToDataUrl, buildPayload, encodeAudio } from '../src/export/payload.js';
 
@@ -51,7 +52,13 @@ test('buildHtml embeds payload and player safely', () => {
   assert.ok(html.startsWith('<!doctype html>'));
   assert.ok(html.includes('<title>TestKit replay: A &lt;b&gt;bold&lt;/b&gt; study (2026-10-06 14:05 UTC)</title>'));
   assert.equal(html.match(/<\/script>/g).length, 2, 'only the two real closing tags');
-  assert.ok(html.includes("connect-src 'none'"), 'CSP blocks network egress');
+  const csp = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)[1];
+  assert.ok(csp.startsWith("default-src 'none'"), 'default-deny CSP');
+  assert.ok(!/https?:|\*|'self'/.test(csp), 'no network source is allowed anywhere');
+  for (const d of ["script-src 'unsafe-inline'", "style-src 'unsafe-inline'", 'img-src data: blob:', 'font-src data:', 'media-src data: blob:']) {
+    assert.ok(csp.includes(d), d);
+  }
+  assert.ok(html.includes('<link rel="icon" href="data:,">'), 'no favicon request');
   const data = html.match(/<script type="application\/json" id="testkit-data">([\s\S]*?)<\/script>/)[1];
   assert.deepEqual(JSON.parse(data), payload);
   assert.ok(html.includes('<script>console.log("<\\/script>")</script>'));
@@ -100,4 +107,70 @@ test('buildPayload matches the export contract', async () => {
   assert.deepEqual(payload.audio, []);
   assert.match(payload.summaryMarkdown, /^# TestKit session: S/);
   assert.deepEqual(Object.keys(payload).sort(), ['audio', 'events', 'exportedAt', 'log', 'session', 'summaryMarkdown', 'testkitVersion', 'version']);
+});
+
+const naive = (payload) => escapeJson(JSON.stringify(payload));
+
+test('payloadParts joined equals escaped JSON.stringify, for any chunk size', () => {
+  const payload = {
+    version: 1,
+    session: { study: 'x</script>', tasks: [] },
+    events: Array.from({ length: 50 }, (_, i) => ({ type: 3, timestamp: i, data: { text: `<b>${i}</b>\u2028`, skip: undefined } })),
+    log: [{ ts: 1, type: 'click', text: '<!--' }, undefined],
+    audio: [
+      { audioSegmentId: 'a', startTs: 1, endTs: 2, mime: 'audio/webm', dataUrl: 'data:audio/webm;codecs=opus;base64,AAEC+v8=' },
+      { audioSegmentId: 'b', startTs: 3, endTs: 4, mime: null, dataUrl: 'data:text/plain,<odd>"' },
+      { dataUrl: null },
+    ],
+    summaryMarkdown: '# <h1>',
+    dropped: undefined,
+  };
+  for (const partChars of [1, 7, 100, 1e9]) {
+    const parts = [...payloadParts(payload, { partChars })];
+    assert.equal(parts.join(''), naive(payload), `partChars=${partChars}`);
+    for (const part of parts) assert.ok(!part.includes('<'), 'every part is escaped on its own');
+  }
+  assert.deepEqual(JSON.parse(serializePayload(payload)), JSON.parse(JSON.stringify(payload)));
+});
+
+test('payloadParts splits events into bounded chunks and emits audio data URLs verbatim', () => {
+  const dataUrl = `data:audio/webm;base64,${'A'.repeat(50_000)}`;
+  const payload = { version: 1, events: Array.from({ length: 1000 }, (_, i) => ({ i, pad: 'x'.repeat(100) })), audio: [{ audioSegmentId: 'a', dataUrl }] };
+  const parts = [...payloadParts(payload, { partChars: 10_000 })];
+  const eventParts = parts.filter((p) => p.includes('"pad"'));
+  assert.ok(eventParts.length >= 10);
+  assert.ok(eventParts.every((p) => p.length < 10_000 + 200));
+  assert.ok(parts.some((p) => p === dataUrl), 'data URL is its own part, not re-stringified');
+  assert.equal(parts.join(''), naive(payload));
+});
+
+test('buildHtmlBlob matches buildHtml byte for byte', async () => {
+  const payload = { version: 1, session: { study: 'S', startedAt: 0 }, events: [{ a: '<x>' }], log: [], audio: [], summaryMarkdown: 'm' };
+  const html = buildHtml({ payload, playerJs: 'void "</script>"' });
+  const { blob } = buildHtmlBlob({ payload, playerJs: 'void "</script>"', flushChars: 16 });
+  assert.equal(blob.type, 'text/html;charset=utf-8');
+  assert.equal(blob.size, byteLength(html));
+  assert.equal(await blob.text(), html);
+  assert.equal([...htmlParts({ payload, playerJs: '' })].join('').match(/<\/script>/g).length, 2);
+});
+
+test('large session: ~150 MB payload exports as a Blob without one giant string', async () => {
+  // 150 snapshot-like events of ~1 MB each (inlined-image sized).
+  const blobChars = 1024 * 1024;
+  const events = Array.from({ length: 150 }, (_, i) => ({ type: 2, timestamp: i, data: { img: `data:image/png;base64,${String.fromCharCode(65 + (i % 26)).repeat(blobChars)}` } }));
+  const audio = [{ audioSegmentId: 'a', startTs: 0, endTs: 1, mime: 'audio/webm', dataUrl: `data:audio/webm;base64,${'Q'.repeat(10 * blobChars)}` }];
+  const payload = { version: 1, session: { study: 'Big', startedAt: 0 }, events, log: [], audio, summaryMarkdown: '' };
+  const payloadChars = 160 * blobChars;
+  global.gc?.();
+  const before = process.memoryUsage();
+  const { blob, largestPart } = buildHtmlBlob({ payload, playerJs: 'void 0' });
+  const after = process.memoryUsage();
+  assert.ok(blob.size > payloadChars, `blob ${blob.size}`);
+  // No part bigger than the largest single item (the 10 MB audio data URL).
+  assert.ok(largestPart <= 10 * blobChars + 64, `largest part ${largestPart}`);
+  const grew = (after.rss - before.rss) / payloadChars;
+  assert.ok(grew < 3, `rss grew ${grew.toFixed(2)}× the payload`);
+  // Round-trip the tail only, to keep the test's own memory modest.
+  const tail = await blob.slice(blob.size - 200).text();
+  assert.ok(tail.endsWith('</script>\n</body>\n</html>\n'));
 });

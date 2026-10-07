@@ -9,9 +9,11 @@
 
 const DB_NAME = 'testkit';
 const DB_VERSION = 1;
-const ACTIVE_KEY = 'testkit:active';
-const LAST_KEY = 'testkit:last';
-const MIRROR_KEY = 'testkit:mirror';
+// Pointers are scoped per study (and mirrors per session): one origin can
+// host several prototypes, and a session must never leak into another study.
+const ACTIVE_KEY = 'testkit:active:';
+const LAST_KEY = 'testkit:last:';
+const MIRROR_KEY = 'testkit:mirror:';
 const FLUSH_MS = 2000;
 const MAX_PENDING_EVENTS = 500;
 const MAX_ATTEMPTS = 3;
@@ -25,6 +27,8 @@ let pendingEvents = []; // [{ sessionId, segmentId, event }]
 let pendingLog = []; // [LogEntry & { sessionId }]
 let pendingWaiter = null; // { promise, resolve } shared by every append in the batch
 let flushTimer = null;
+const inflight = new Set(); // settle promises of batches still writing or awaiting a retry
+const tombstones = new Set(); // deleted session ids: their retries must not resurrect rows
 const errorListeners = new Set();
 
 // ---------------------------------------------------------------------------
@@ -186,26 +190,43 @@ function scheduleFlush(immediate) {
 }
 
 /**
- * Writes everything buffered. The transaction is opened synchronously when the
- * DB is open, so this is safe to call from pagehide, and any read transaction
- * opened afterwards observes these writes.
+ * Writes everything buffered and resolves once every batch — including ones
+ * from earlier flushes still waiting on a retry — has landed or been given up
+ * on. The transaction is opened synchronously when the DB is open, so this is
+ * safe to call from pagehide, and any read transaction opened after the
+ * returned promise resolves observes these writes.
  * Never rejects: failures are retried, then reported via onError().
  */
 export function flush() {
   clearTimeout(flushTimer);
   flushTimer = null;
-  if (!pendingEvents.length && !pendingLog.length) return Promise.resolve();
-  if (!db) return ready().then(flush, (err) => notifyError(err));
-  const batch = { events: pendingEvents, log: pendingLog, waiter: pendingWaiter, attempts: 0 };
-  pendingEvents = [];
-  pendingLog = [];
-  pendingWaiter = null;
-  writeBatch(batch);
-  return batch.waiter ? batch.waiter.promise : Promise.resolve();
+  if (pendingEvents.length || pendingLog.length) {
+    if (!db) return ready().then(flush, (err) => notifyError(err));
+    let settle;
+    const batch = { events: pendingEvents, log: pendingLog, waiter: pendingWaiter, attempts: 0 };
+    batch.settled = new Promise((r) => (settle = r));
+    batch.settle = settle;
+    pendingEvents = [];
+    pendingLog = [];
+    pendingWaiter = null;
+    inflight.add(batch.settled);
+    writeBatch(batch);
+  }
+  return Promise.all(inflight).then(() => {});
 }
 
 function writeBatch(batch) {
-  const done = () => batch.waiter?.resolve();
+  const done = () => {
+    batch.waiter?.resolve();
+    inflight.delete(batch.settled);
+    batch.settle();
+  };
+  batch.events = batch.events.filter((p) => !tombstones.has(p.sessionId));
+  batch.log = batch.log.filter((e) => !tombstones.has(e.sessionId));
+  if (!batch.events.length && !batch.log.length) {
+    done();
+    return;
+  }
   const retry = (err) => {
     batch.attempts += 1;
     if (batch.attempts >= MAX_ATTEMPTS || !db) {
@@ -339,9 +360,11 @@ export async function loadSessionData(id) {
 }
 
 export async function deleteSession(id) {
+  tombstones.add(id);
   pendingEvents = pendingEvents.filter((p) => p.sessionId !== id);
   pendingLog = pendingLog.filter((e) => e.sessionId !== id);
-  // Let any in-flight batch for this session land first so nothing is left behind.
+  // Drain in-flight batches (their retries now skip this session) so the
+  // delete below runs after every write that could still add rows.
   await flush();
   await ready();
   const tx = db.transaction(['sessions', 'events', 'log', 'audio'], 'readwrite');
@@ -356,8 +379,9 @@ export async function deleteSession(id) {
 }
 
 // ---------------------------------------------------------------------------
-// localStorage pointers. `testkit:active` is read synchronously by the loader;
-// `testkit:last` remembers a stopped session so a reload can still export it.
+// localStorage pointers, keyed by study. `testkit:active:<study>` is read
+// synchronously by the loader; `testkit:last:<study>` remembers a stopped
+// session so a reload can still export it.
 
 function lsGet(key) {
   try {
@@ -377,19 +401,19 @@ function lsSet(key, value) {
 }
 
 // Synchronous copy of a session's critical fields (see persist() in session.js).
-export function getSessionMirror() {
+export function getSessionMirror(id) {
   try {
-    return JSON.parse(lsGet(MIRROR_KEY) || 'null');
+    return JSON.parse(lsGet(MIRROR_KEY + id) || 'null');
   } catch {
     return null;
   }
 }
-export const setSessionMirror = (mirror) => lsSet(MIRROR_KEY, JSON.stringify(mirror));
-export const clearSessionMirror = () => lsSet(MIRROR_KEY, null);
+export const setSessionMirror = (mirror) => lsSet(MIRROR_KEY + mirror.id, JSON.stringify(mirror));
+export const clearSessionMirror = (id) => lsSet(MIRROR_KEY + id, null);
 
-export const getActiveSessionId = () => lsGet(ACTIVE_KEY);
-export const setActiveSessionId = (id) => lsSet(ACTIVE_KEY, id);
-export const clearActiveSessionId = () => lsSet(ACTIVE_KEY, null);
-export const getLastSessionId = () => lsGet(LAST_KEY);
-export const setLastSessionId = (id) => lsSet(LAST_KEY, id);
-export const clearLastSessionId = () => lsSet(LAST_KEY, null);
+export const getActiveSessionId = (study) => lsGet(ACTIVE_KEY + study);
+export const setActiveSessionId = (study, id) => lsSet(ACTIVE_KEY + study, id);
+export const clearActiveSessionId = (study) => lsSet(ACTIVE_KEY + study, null);
+export const getLastSessionId = (study) => lsGet(LAST_KEY + study);
+export const setLastSessionId = (study, id) => lsSet(LAST_KEY + study, id);
+export const clearLastSessionId = (study) => lsSet(LAST_KEY + study, null);

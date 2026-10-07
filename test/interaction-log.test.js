@@ -41,3 +41,28 @@ test('log() stamps ts, type, url and taskId, and survives a throwing sink', () =
   const throwing = createInteractionLog({ onEntry: () => { throw new Error('sink'); } });
   assert.doesNotThrow(() => throwing.log('pause'));
 });
+
+test('a debounced input keeps the task, time and URL of the keystroke', () => {
+  const handlers = {};
+  const sink = { addEventListener: (name, fn) => (handlers[name] = fn), removeEventListener() {} };
+  globalThis.document = { ...sink, referrer: '' };
+  globalThis.window = sink;
+  globalThis.history ??= { pushState() {}, replaceState() {} };
+  globalThis.location = { href: 'https://example.test/a' };
+  let task = 'A';
+  const entries = [];
+  const ilog = createInteractionLog({ mask: true, getTaskId: () => task, onEntry: (e) => entries.push(e) });
+  ilog.start();
+  const field = { nodeType: 1, localName: 'input', type: 'text', value: 'secret', getAttribute: () => null, closest: () => null };
+  handlers.input({ target: field, composedPath: () => [field] });
+  const typedAt = Date.now();
+  task = 'B';
+  globalThis.location = { href: 'https://example.test/b' };
+  ilog.flushPending();
+  ilog.stop();
+  const input = entries.find((e) => e.type === 'input');
+  assert.equal(input.taskId, 'A');
+  assert.equal(input.url, 'https://example.test/a');
+  assert.ok(input.ts <= typedAt);
+  assert.equal(input.value, '***');
+});

@@ -4,13 +4,16 @@ import rrwebPlayer from 'rrweb-player';
 import RRWEB_CSS from 'rrweb-player/dist/style.css';
 import PLAYER_CSS from './player.css';
 import {
-  buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
+  audioGaps, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
 } from '../export/summary.js';
 import { buildFilename } from '../export/html.js';
+import { findRemoteAssets } from './assets.js';
 
 const SEEK_STEP_MS = 5000;
 const SEEK_PAGE_MS = 30000;
 const DRIFT_TOLERANCE_S = 0.3;
+// Chrome and Firefox mute media above 4× (and speech is unintelligible anyway).
+const MAX_AUDIBLE_RATE = 4;
 const MIN_SKIPPABLE_PAUSE_MS = 1500;
 const CONTROLLER_HEIGHT = 80; // rrweb-player's fixed controller bar
 const RRWEB_META = 4;
@@ -58,6 +61,10 @@ function readPayload() {
   if (payload.version !== 1) throw new Error(`Unsupported export version: ${payload.version}. Open it with a matching TestKit player.`);
   return {
     ...payload,
+    // The embedded text is already the payload as JSON (escaping keeps it
+    // valid), so "Download raw JSON" re-reads it instead of re-serializing,
+    // and nothing holds a second copy between downloads.
+    rawJson: () => el.textContent,
     session: payload.session || {},
     events: Array.isArray(payload.events) ? payload.events : [],
     log: Array.isArray(payload.log) ? payload.log : [],
@@ -147,6 +154,11 @@ function createAudioSync(segments, { onStatus }) {
     }
     if (!it.ready) {
       status(`load-${it.index}`, `Loading audio ${label}…`);
+      return;
+    }
+    if (speed > MAX_AUDIBLE_RATE) {
+      if (!it.el.paused) it.el.pause();
+      status(`fast-${it.index}`, `Muted above ${MAX_AUDIBLE_RATE}× (${label})`);
       return;
     }
     try {
@@ -375,7 +387,7 @@ function mount() {
   const { session, events, log, audio } = data;
   const meta = session.meta || {};
   const tasks = session.tasks || session.config?.tasks || [];
-  const summary = data.summaryMarkdown || buildSummary({ session, log, events });
+  const summary = data.summaryMarkdown || buildSummary({ session, log, events, audio });
   const replayable = events.length >= 2 && events.some((e) => e.type === RRWEB_FULL_SNAPSHOT);
   const t0 = replayable ? events[0].timestamp : session.startedAt;
   const t1 = replayable ? events[events.length - 1].timestamp : session.endedAt ?? t0;
@@ -389,23 +401,7 @@ function mount() {
     return { ...span, n, prompt, label: `Task ${n}: ${prompt}`, short: `${n}. ${prompt}` };
   });
   const errors = log.filter((e) => e.type === 'error' || e.type === 'rejection');
-  const gaps = [];
-  // Silence while paused is expected (pause stops the recorder), so only
-  // unexplained silence counts as a gap.
-  for (let i = 1; i < audio.length; i++) {
-    const start = audio[i - 1].endTs;
-    const end = audio[i].startTs;
-    if (end - start - overlapMs(start, end, pauses) > 250) gaps.push({ start, end });
-  }
-  // Logged gaps carry gapStart + gapMs; gapMs is null when the mic was
-  // unavailable, in which case the gap runs to the next audio segment.
-  for (const e of log) {
-    if (e.type !== 'audio-gap') continue;
-    const ms = e.gapMs === null || e.gapMs === undefined ? NaN : Number(e.gapMs);
-    const start = Number.isFinite(e.gapStart) ? e.gapStart : Number.isFinite(ms) ? e.ts - ms : e.ts;
-    const end = Number.isFinite(ms) ? start + ms : audio.find((a) => a.startTs > start)?.startTs ?? sessionEnd;
-    if (end > start && !gaps.some((g) => start < g.end && end > g.start)) gaps.push({ start, end });
-  }
+  const gaps = audioGaps({ session, log, audio, start: sessionStart, end: sessionEnd, pauses });
 
   // ---- header ----
   const toast = createToast();
@@ -415,7 +411,7 @@ function mount() {
     if (!ok) summaryDetails.open = true;
   };
   const downloadJson = () => {
-    download(buildFilename(session, 'json'), JSON.stringify(data), 'application/json');
+    download(buildFilename(session, 'json'), data.rawJson(), 'application/json');
     toast.show('Raw JSON download started');
   };
   const durationText = Number.isFinite(sessionEnd - sessionStart)
@@ -425,6 +421,25 @@ function mount() {
   const protoLink = meta.prototypeUrl
     ? h('a', { href: meta.prototypeUrl, target: '_blank', rel: 'noopener noreferrer' }, meta.prototypeUrl)
     : 'unknown';
+  // The export's CSP blocks every remote fetch, so assets the recording did
+  // not inline cannot load. Count them from the stream up front, then add any
+  // URL a CSP violation reports that the scan missed.
+  const blocked = new Set(findRemoteAssets(events));
+  const assetNotice = h('p', { class: 'tk-notice', role: 'note', hidden: true });
+  const renderAssetNotice = () => {
+    const n = blocked.size;
+    assetNotice.hidden = n === 0;
+    assetNotice.textContent = `${n} remote asset${n === 1 ? '' : 's'} (images, fonts, or stylesheets) referenced by the prototype ${n === 1 ? 'was' : 'were'} not loaded, to keep this file offline. Parts of the replay may look unstyled or show missing images.`;
+    assetNotice.title = [...blocked].slice(0, 20).join('\n');
+  };
+  const noteViolation = (ev) => {
+    const uri = ev.blockedURI || '';
+    if (!/^https?:/i.test(uri) || blocked.has(uri)) return;
+    blocked.add(uri);
+    renderAssetNotice();
+  };
+  document.addEventListener('securitypolicyviolation', noteViolation);
+  renderAssetNotice();
   const header = h('header', { class: 'tk-header' },
     h('div', { class: 'tk-header-main' },
       h('p', { class: 'tk-eyebrow' }, 'TestKit session replay'),
@@ -432,11 +447,12 @@ function mount() {
       h('dl', { class: 'tk-meta' },
         metaItem('Started', formatLocal(sessionStart)),
         metaItem('Duration', durationText),
-        metaItem('Tasks', `${spans.filter((s) => s.ended).length} of ${tasks.length || spans.length} completed`),
+        metaItem('Tasks', `${spans.filter((s) => s.completed).length} of ${tasks.length || spans.length} completed`),
         metaItem('Browser', describeBrowser(meta.userAgent)),
         metaItem('Viewport', meta.viewport ? `${meta.viewport.w} × ${meta.viewport.h}` : 'unknown'),
         metaItem('Commit', meta.commitSha ? h('code', {}, meta.commitSha) : 'unknown'),
-        metaItem('Prototype', protoLink))),
+        metaItem('Prototype', protoLink)),
+      assetNotice),
     h('div', { class: 'tk-actions' },
       h('button', { type: 'button', class: 'tk-btn tk-btn--primary', onclick: copySummary }, 'Copy agent summary'),
       h('button', { type: 'button', class: 'tk-btn', onclick: downloadJson }, 'Download raw JSON')));
@@ -495,7 +511,7 @@ function mount() {
     if (errCount) badges.push(h('span', { class: 'tk-badge tk-badge--danger' }, `${errCount} error${errCount > 1 ? 's' : ''}`));
     if (detectRageClicks(entries).length) badges.push(h('span', { class: 'tk-badge' }, 'Rage clicks'));
     if (span.task?.timeLimit && active > span.task.timeLimit * 1000) badges.push(h('span', { class: 'tk-badge' }, 'Over time limit'));
-    if (!span.ended) badges.push(h('span', { class: 'tk-badge' }, 'Not ended'));
+    if (!span.completed) badges.push(h('span', { class: 'tk-badge' }, 'Not completed'));
     const btn = h('button', {
       type: 'button',
       class: 'tk-task',
@@ -624,6 +640,11 @@ function mount() {
   skipBox.addEventListener('change', () => { skipPauses = skipBox.checked; });
 
   const replayer = player.getReplayer();
+  // Each full snapshot rebuilds the iframe document (document.open), which
+  // drops listeners, so re-attach the violation listener every time.
+  const watchFrame = () => replayer.iframe?.contentDocument?.addEventListener('securitypolicyviolation', noteViolation);
+  watchFrame();
+  replayer.on('fullsnapshot-rebuilded', watchFrame);
   // rrweb-player ships icon-only buttons and an untitled iframe; name them.
   replayer.iframe?.setAttribute('title', 'Session replay');
   const controlButtons = stage.querySelectorAll('.rr-controller__btns button');

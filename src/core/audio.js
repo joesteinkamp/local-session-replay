@@ -3,9 +3,9 @@
 // One MediaStream is held for the page's lifetime (preflight test → recording)
 // so the browser prompts at most once per page. Each MediaRecorder start/stop
 // span is an audio segment; chunks arrive every TIMESLICE_MS so a navigation
-// loses at most one partial chunk.
+// loses at most about one chunk (data emitted after pagehide rarely persists).
 
-const TIMESLICE_MS = 3000;
+const TIMESLICE_MS = 1000;
 const STOP_TIMEOUT_MS = 2000;
 const MIME_PREFERENCE = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'];
 // Level meter maps RMS in dBFS onto 0..1: room noise ≈ 0–0.15, normal speech
@@ -176,6 +176,15 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     return Promise.race([seg.stopped, new Promise((r) => setTimeout(r, STOP_TIMEOUT_MS))]);
   }
 
+  /** Asks the recorder to emit buffered audio now (best effort, e.g. when hidden). */
+  function requestData() {
+    try {
+      if (recorder?.state === 'recording') recorder.requestData();
+    } catch {
+      // Not supported or already stopping.
+    }
+  }
+
   /** Mute keeps the recorder running (silence) so the audio clock stays aligned. */
   function setMuted(value) {
     muted = !!value;
@@ -214,6 +223,7 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     acquire,
     startSegment,
     stopSegment,
+    requestData,
     setMuted,
     getLevel,
     release,

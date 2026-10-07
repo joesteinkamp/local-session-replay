@@ -173,6 +173,11 @@ function mount(controller) {
     return clock.phase === 'recording' ? clock.elapsedMs + (Date.now() - clock.at) : clock.elapsedMs;
   }
 
+  // Another tab owns the recording; this tab must not offer controls that fight it.
+  function otherTab(s = state) {
+    return s.otherTab === true || /another tab/i.test(String(s.error || ''));
+  }
+
   function currentTask() {
     return state.tasks?.[state.taskIndex] || null;
   }
@@ -222,6 +227,7 @@ function mount(controller) {
   }
 
   function primaryFid() {
+    if (otherTab()) return 'collapse';
     switch (state.phase) {
       case 'idle': return 'start';
       case 'preflight': return 'consent';
@@ -238,8 +244,15 @@ function mount(controller) {
     const prev = state;
     state = next;
     syncClock(next);
+    const wasLocked = otherTab(prev);
     if (prev.phase !== next.phase) onPhaseChange(prev.phase, next.phase);
     else if (prev.taskIndex !== next.taskIndex && ACTIVE.has(next.phase)) onTaskChange();
+    if (otherTab() && !wasLocked) {
+      ui.confirm = null;
+      ui.followUpFor = null;
+      open = true;
+      announce('Recording is active in another tab. Close this tab to continue in the other one.');
+    }
     render();
   }
 
@@ -413,7 +426,7 @@ function mount(controller) {
           (res) => {
             ui.exportResult = res || {};
             const size = res?.bytes ? ` (${formatBytes(res.bytes)})` : '';
-            announce(`Session file downloaded${size}.`);
+            announce(`Download started${size}. Check your downloads folder.`);
           },
           (err) => {
             ui.exportError = errorMessage(err);
@@ -467,7 +480,7 @@ function mount(controller) {
     return JSON.stringify([
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
-      state.error ? String(state.error) : null, state.taskStartedAt,
+      state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
       ui.actionError, ui.timeUp,
     ]);
@@ -559,6 +572,7 @@ function mount(controller) {
   function bubbleContent() {
     const label = h('span', { class: 'tk-sr', text: 'Open TestKit panel. ' });
     const logo = h('span', { class: 'tk-logo', 'aria-hidden': 'true', text: 'TK' });
+    if (otherTab()) return [label, logo, 'Other tab'];
     switch (state.phase) {
       case 'recording':
       case 'paused':
@@ -575,7 +589,7 @@ function mount(controller) {
   }
 
   function panelHead() {
-    const active = ACTIVE.has(state.phase);
+    const active = ACTIVE.has(state.phase) && !otherTab();
     return h(
       'div',
       { class: 'tk-head' },
@@ -617,13 +631,22 @@ function mount(controller) {
     const out = [];
     // A failed export also sets state.error; the stopped view already explains it.
     const exportFailure = ui.exportError && (state.phase === 'stopped' || state.phase === 'exporting');
-    if (state.error && !exportFailure) out.push(notice(errorMessage(state.error), 'error'));
+    if (state.error && !exportFailure && !otherTab()) out.push(notice(errorMessage(state.error), 'error'));
     if (ui.actionError) out.push(h('p', { class: 'tk-notice is-error', role: 'alert' }, ui.actionError));
     return out;
   }
 
+  function otherTabView() {
+    return [
+      h('h2', { class: 'tk-h', text: 'Session open in another tab' }),
+      notice('Recording is active in another tab. Close this tab to continue in the other one.', 'warn'),
+      h('p', { class: 'tk-p', text: 'Controls are turned off here so the two tabs can’t interfere with each other.' }),
+    ];
+  }
+
   function panelBody() {
     let content;
+    if (otherTab()) return h('div', { class: 'tk-body' }, ...errorNotices(), ...otherTabView());
     switch (state.phase) {
       case 'preflight': content = preflightView(); break;
       case 'recording':
@@ -896,7 +919,8 @@ function mount(controller) {
 
     if (res && !exporting) {
       const size = res.bytes ? ` (${formatBytes(res.bytes)})` : '';
-      out.push(notice(`✓ Downloaded ${res.filename || 'session file'}${size}. Check your downloads folder.`, 'ok'));
+      // We only know the download was handed to the browser, not that it landed.
+      out.push(notice(`Download started: ${res.filename || 'session file'}${size}. Check your downloads folder; if it isn’t there, use Download again.`, 'ok'));
     }
     if (ui.exportError && !exporting) out.push(notice(`Export failed: ${ui.exportError}`, 'error'));
     if (!res && !exporting && !ui.exportError) {
@@ -1079,14 +1103,22 @@ function mount(controller) {
   }
 
   // Keys typed in the overlay (e.g. the follow-up textarea) must not trigger
-  // prototype shortcuts, so they stop at the layer.
+  // prototype shortcuts. Stopping at window capture is the earliest point we
+  // can reach: it blocks every document/element listener and window listeners
+  // registered after ours. Limitation: window capture listeners the prototype
+  // registered before TestKit loaded still fire first; nothing in-page can
+  // prevent that. Default actions (typing, Tab, Enter/Space on buttons) are
+  // unaffected, and Esc is handled here since inner listeners never see keys.
   function onKey(e) {
+    if (!e.composedPath().includes(host)) return;
+    e.stopImmediatePropagation();
     if (e.type === 'keydown' && e.key === 'Escape' && open) {
       if (ui.confirm) cancelConfirm();
       else setOpen(false, { focus: true });
     }
-    e.stopPropagation();
   }
+  const onKeyGuarded = guard(onKey);
+  const KEY_EVENTS = ['keydown', 'keyup', 'keypress'];
 
   const onResize = guard(() => applyPosition());
 
@@ -1095,7 +1127,7 @@ function mount(controller) {
   bubble.addEventListener('pointerup', guard((e) => endDrag(e, false)));
   bubble.addEventListener('pointercancel', guard((e) => endDrag(e, true)));
   bubble.addEventListener('click', guard(onBubbleClick));
-  for (const type of ['keydown', 'keyup', 'keypress']) layer.addEventListener(type, guard(onKey));
+  for (const type of KEY_EVENTS) window.addEventListener(type, onKeyGuarded, true);
   window.addEventListener('resize', onResize);
 
   let unsubscribe = null;
@@ -1118,6 +1150,7 @@ function mount(controller) {
       clearInterval(ticker);
       clearTimeout(announceTimer);
       window.removeEventListener('resize', onResize);
+      for (const type of KEY_EVENTS) window.removeEventListener(type, onKeyGuarded, true);
       try {
         if (typeof unsubscribe === 'function') unsubscribe();
       } catch {

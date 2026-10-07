@@ -24,8 +24,10 @@ they download the file.
 ```
 
 Put both tags on **every page** of a multi-page prototype (a shared
-`testkit-config.js` works well — see `demo/`). Pin the versioned path (`/v1/`);
-breaking changes ship under a new version so existing prototypes keep working.
+`testkit-config.js` works well — see `demo/`). Pin the versioned path (`/v1/`).
+The build writes to `/v<major>/` from `package.json`, so a breaking release
+goes to a new path. Pages replaces the whole site on each deploy, so when `/v2/`
+ships, keep publishing `/v1/` from a `v1` branch or tag build alongside it.
 
 `testkit.js` is a ~1 KB loader. The recorder (`testkit-core.js`) is only
 fetched when testing is active, so casual viewers pay nothing.
@@ -39,6 +41,7 @@ fetched when testing is active, so casual viewers pay nothing.
 | `audio` | `{ enabled: true, bitrate: 32000 }` | `audio: false` disables the mic entirely. ~15 MB/hour at 32 kbps. |
 | `mask` | `{ inputs: true }` | Masks typed values in the replay and the interaction log. |
 | `checkoutEveryNms` | `60000` | Periodic full DOM snapshots, so seeking stays fast. |
+| `inlineImages` | `true` | Embeds `<img>` content in the recording so replays survive redeploys. Turn off for image-heavy prototypes (large files) or prototypes with cross-origin images whose servers don't send CORS headers — rrweb retries those with `crossOrigin` set, which can break them on the live page. |
 | `commitSha` | `<meta name="testkit:commit">` | Recorded in the export metadata. In CI, template `$CI_COMMIT_SHA` into the meta tag. |
 | `tasks[]` | `[]` | `{ id, prompt, successHint?, timeLimit?, followUp? }`. `timeLimit` is seconds (a gentle nudge, never auto-advances). `followUp` asks a question after the task. `successHint` is shown behind a disclosure and in the summary as "Expected". |
 
@@ -57,10 +60,15 @@ fetched when testing is active, so casual viewers pay nothing.
 
 Reloads, crashes, and page navigations resume the same session automatically.
 Expect 1–2 s of silence in the audio at each page load (marked on the timeline).
+A session left idle for more than 30 minutes is not resumed: it is stopped and
+stays available to download from `?test=1`.
 
 ## The export
 
-Open the downloaded `.html` file in any browser, offline:
+Open the downloaded `.html` file in any browser, offline. The file blocks all
+network requests, so anything the recording didn't embed (remote fonts, CSS
+background images, images with inlining off) shows up missing in the replay
+rather than loading from the prototype's server.
 
 - Replay with task markers, pause spans, audio gaps, and error ticks on a
   scrubbable timeline (keyboard: ←/→ 5 s, PgUp/PgDn 30 s, Home/End, Space).
@@ -91,8 +99,8 @@ default branch.
 - Assets loaded from relative paths (fonts especially) are the most common
   replay-fidelity gap. Stylesheets and same-origin images are inlined;
   check a replay per prototype.
-- Safari may re-prompt for mic permission on each page load of a multi-page
-  prototype. If the tester declines, recording continues without audio.
+- Safari, and Firefox by default, may re-prompt for mic permission on each page
+  load of a multi-page prototype. If the tester declines, recording continues without audio.
   Audio-heavy studies are smoother on single-page prototypes.
 - Desktop browsers are the primary target.
 - Transcription (in-browser Whisper) is planned for v1.5.
