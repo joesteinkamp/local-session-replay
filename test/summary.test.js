@@ -1,0 +1,318 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  buildSummary, buildTaskSpans, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
+  detectRageClicks, formatDuration, formatTrailLine, overlapMs, pausedSpans, shortUrl,
+} from '../src/export/summary.js';
+
+const T = 1_760_000_000_000;
+const at = (s) => T + s * 1000;
+const click = (s, selector = 'button#apply', text = 'Apply') => ({ ts: at(s), type: 'click', selector, text, url: 'https://x.test/' });
+
+test('formatDuration rounds by default, floors on request, adds hours', () => {
+  assert.equal(formatDuration(0), '00:00');
+  assert.equal(formatDuration(59_600), '01:00');
+  assert.equal(formatDuration(59_600, { floor: true }), '00:59');
+  assert.equal(formatDuration(3_725_000), '1:02:05');
+  assert.equal(formatDuration(-5), '00:00');
+  assert.equal(formatDuration(undefined), '00:00');
+});
+
+test('describeBrowser names common browsers and OSes', () => {
+  assert.equal(describeBrowser('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'), 'Chrome 141 on macOS');
+  assert.equal(describeBrowser('Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0'), 'Firefox 131 on Windows');
+  assert.equal(describeBrowser('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15'), 'Safari 18.1 on macOS');
+  assert.equal(describeBrowser('Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/130.0 Safari/537.36 Edg/130.0'), 'Edge 130 on Windows');
+  assert.equal(describeBrowser(''), 'unknown');
+  assert.equal(describeBrowser('curl/8'), 'curl/8');
+});
+
+test('shortUrl strips the prototype origin only', () => {
+  assert.equal(shortUrl('https://x.test/a/b.html?q=1#h', 'https://x.test/a/'), '/a/b.html?q=1#h');
+  assert.equal(shortUrl('https://other.test/z', 'https://x.test/'), 'https://other.test/z');
+  assert.equal(shortUrl('', 'https://x.test/'), '');
+  assert.equal(shortUrl('not a url'), 'not a url');
+});
+
+test('detectRageClicks: 3 clicks within 1s on one selector', () => {
+  const hits = detectRageClicks([click(1), click(1.3), click(1.6)]);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].count, 3);
+  assert.equal(hits[0].selector, 'button#apply');
+  assert.equal(hits[0].start, at(1));
+});
+
+test('detectRageClicks: ignores slow clicks, 2-click bursts, and mixed selectors', () => {
+  assert.equal(detectRageClicks([click(1), click(1.6), click(2.2)]).length, 0, 'spread over 1.2s');
+  assert.equal(detectRageClicks([click(1), click(1.2)]).length, 0);
+  assert.equal(detectRageClicks([click(1, 'a'), click(1.1, 'b'), click(1.2, 'c')]).length, 0);
+  assert.equal(detectRageClicks([{ ts: at(1), type: 'click' }, { ts: at(1.1), type: 'click' }, { ts: at(1.2), type: 'click' }]).length, 0, 'no selector');
+});
+
+test('detectRageClicks: one burst per run, interleaved selectors tracked separately', () => {
+  const log = [click(1), click(1.2, 'a'), click(1.3), click(1.5), click(1.7), click(1.8, 'a'), click(5), click(5.1), click(5.2)];
+  const hits = detectRageClicks(log);
+  assert.deepEqual(hits.map((h) => [h.selector, h.count]), [['button#apply', 4], ['button#apply', 3]]);
+});
+
+test('detectRageClicks: honors custom thresholds', () => {
+  assert.equal(detectRageClicks([click(1), click(1.5), click(2)], { windowMs: 1000 }).length, 1);
+  assert.equal(detectRageClicks([click(1), click(1.5), click(2)], { count: 4 }).length, 0);
+});
+
+test('pausedSpans pairs pause/resume and closes open pauses', () => {
+  const log = [{ ts: at(10), type: 'pause' }, { ts: at(20), type: 'resume' }, { ts: at(30), type: 'pause' }];
+  assert.deepEqual(pausedSpans(log, at(40)), [{ start: at(10), end: at(20) }, { start: at(30), end: at(40) }]);
+  assert.deepEqual(pausedSpans(log), [{ start: at(10), end: at(20) }], 'no end: open pause dropped');
+  assert.deepEqual(pausedSpans([{ ts: at(1), type: 'pause' }, { ts: at(2), type: 'pause' }, { ts: at(3), type: 'resume' }]), [{ start: at(1), end: at(3) }]);
+  assert.deepEqual(pausedSpans([{ ts: at(1), type: 'pause' }, { ts: at(4), type: 'session-end' }]), [{ start: at(1), end: at(4) }]);
+});
+
+test('overlapMs sums intersections', () => {
+  const spans = [{ start: 10, end: 20 }, { start: 30, end: 40 }];
+  assert.equal(overlapMs(0, 100, spans), 20);
+  assert.equal(overlapMs(15, 35, spans), 10);
+  assert.equal(overlapMs(20, 30, spans), 0);
+});
+
+test('detectIdle: flags ≥20s gaps between entries within bounds', () => {
+  const log = [{ ts: at(5), type: 'click' }, { ts: at(30), type: 'click' }];
+  const idle = detectIdle(log, { start: at(0), end: at(35) });
+  assert.equal(idle.length, 1);
+  assert.equal(idle[0].start, at(5));
+  assert.equal(idle[0].durationMs, 25000);
+  assert.equal(idle[0].activity, false);
+});
+
+test('detectIdle: just under the threshold is not idle; gap to the end counts', () => {
+  assert.equal(detectIdle([{ ts: at(1), type: 'click' }], { start: at(0), end: at(20.9) }).length, 0);
+  const idle = detectIdle([{ ts: at(1), type: 'click' }], { start: at(0), end: at(21) });
+  assert.equal(idle.length, 1);
+  assert.equal(idle[0].end, at(21));
+});
+
+test('detectIdle: paused time is excluded', () => {
+  const log = [{ ts: at(0), type: 'click' }, { ts: at(30), type: 'click' }];
+  assert.equal(detectIdle(log, { start: at(0), end: at(30), pauses: [{ start: at(5), end: at(20) }] }).length, 0);
+  assert.equal(detectIdle(log, { start: at(0), end: at(30), pauses: [{ start: at(5), end: at(8) }] })[0].durationMs, 27000);
+});
+
+test('detectIdle: notes rrweb pointer/scroll activity during the gap', () => {
+  const events = [{ type: 3, timestamp: at(12), data: { source: 1 } }];
+  assert.equal(detectIdle([], { start: at(0), end: at(25), events })[0].activity, true);
+  const mutationOnly = [{ type: 3, timestamp: at(12), data: { source: 0 } }];
+  assert.equal(detectIdle([], { start: at(0), end: at(25), events: mutationOnly })[0].activity, false);
+  const duringPause = { start: at(10), end: at(14) };
+  assert.equal(detectIdle([], { start: at(0), end: at(30), pauses: [duringPause], events })[0].activity, false);
+});
+
+test('detectIdle: empty input', () => {
+  assert.deepEqual(detectIdle([]), []);
+});
+
+test('detectBacktracking: popstate and returning to a visited URL', () => {
+  const nav = (s, navType, from, to) => ({ ts: at(s), type: 'nav', navType, from, to });
+  const log = [
+    nav(1, 'pushState', 'https://x.test/', 'https://x.test/a'),
+    nav(2, 'pushState', 'https://x.test/a', 'https://x.test/b'),
+    nav(3, 'popstate', 'https://x.test/b', 'https://x.test/a'),
+    nav(4, 'pushState', 'https://x.test/a', 'https://x.test/'),
+  ];
+  const hits = detectBacktracking(log, { initialUrls: ['https://x.test/'] });
+  assert.deepEqual(hits.map((h) => h.ts), [at(3), at(4)]);
+});
+
+test('detectBacktracking: reloads, replaceState and beforeunload are not backtracking', () => {
+  const nav = (s, navType, from, to) => ({ ts: at(s), type: 'nav', navType, from, to });
+  const log = [
+    nav(1, 'beforeunload', 'https://x.test/', null),
+    nav(2, 'load', 'https://x.test/', 'https://x.test/'),
+    nav(3, 'replaceState', 'https://x.test/', 'https://x.test/?q=1'),
+    nav(4, 'load', 'https://x.test/', 'https://x.test/b'),
+  ];
+  assert.deepEqual(detectBacktracking(log, { initialUrls: ['https://x.test/'] }), []);
+});
+
+test('detectBacktracking: multi-page return via load, trailing slash insensitive', () => {
+  const log = [
+    { ts: at(1), type: 'nav', navType: 'load', from: 'https://x.test/', to: 'https://x.test/about.html' },
+    { ts: at(2), type: 'nav', navType: 'load', from: 'https://x.test/about.html', to: 'https://x.test' },
+  ];
+  assert.equal(detectBacktracking(log, { initialUrls: ['https://x.test/'] }).length, 1);
+});
+
+test('collapseTrail merges input/change runs on one selector', () => {
+  const log = [
+    { ts: at(1), type: 'input', selector: '#a', value: 'h' },
+    { ts: at(2), type: 'input', selector: '#a', value: 'he' },
+    { ts: at(3), type: 'change', selector: '#a', value: 'hey' },
+    { ts: at(4), type: 'input', selector: '#b', value: 'x' },
+    { ts: at(5), type: 'click', selector: '#go' },
+    { ts: at(6), type: 'input', selector: '#a', value: 'again' },
+    { ts: at(7), type: 'task-start' },
+    { ts: at(8), type: 'nav', navType: 'beforeunload' },
+  ];
+  const trail = collapseTrail(log);
+  assert.deepEqual(trail.map((t) => [t.type, t.selector, t.value, t.edits]), [
+    ['input', '#a', 'hey', 3], ['input', '#b', 'x', 1], ['click', '#go', undefined, 1], ['input', '#a', 'again', 1],
+  ]);
+  assert.equal(trail[0].ts, at(1), 'run keeps its first timestamp');
+});
+
+test('collapseTrail keeps a lone change as change', () => {
+  const trail = collapseTrail([{ ts: at(1), type: 'change', selector: 'select#size', value: 'M' }]);
+  assert.equal(formatTrailLine(trail[0], at(0)), '00:01 change select#size = "M"');
+});
+
+test('formatTrailLine formats each kind compactly', () => {
+  assert.equal(formatTrailLine({ ...click(12.9), edits: 1 }, at(0)), '00:12 click button#apply "Apply"');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'click', selector: 'div.card', text: '' }, at(0)), '00:03 click div.card');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'input', selector: '#e', value: '***', edits: 5 }, at(0)), '00:03 input #e = "***" (5 edits)');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'nav', navType: 'pushState', to: 'https://x.test/a?b=1' }, at(0), 'https://x.test/'), '00:03 nav pushState /a?b=1');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'error', message: 'Boom' }, at(0)), '00:03 error "Boom"');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 1500 }, at(0)), '00:03 audio-gap 1.5s');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'pause' }, at(0)), '00:03 pause');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'click', selector: '#q', text: 'Say "hi"\n  now' }, at(0)), '00:03 click #q "Say \\"hi\\" now"');
+  const long = formatTrailLine({ ts: at(3), type: 'click', selector: '#q', text: 'x'.repeat(200) }, at(0));
+  assert.ok(long.length < 110 && long.endsWith('…"'));
+});
+
+test('buildTaskSpans: closes at task-end, next task-start, or session end', () => {
+  const session = { tasks: [{ id: 't1', prompt: 'One' }, { id: 't2', prompt: 'Two' }, { id: 't3', prompt: 'Three' }], startedAt: at(0), endedAt: at(100) };
+  const log = [
+    { ts: at(1), type: 'task-start', taskId: 't1' },
+    { ts: at(10), type: 'task-end', taskId: 't1' },
+    { ts: at(11), type: 'task-start', taskId: 't2' },
+    { ts: at(20), type: 'task-start', taskId: 't3' },
+  ];
+  const spans = buildTaskSpans({ session, log });
+  assert.deepEqual(spans.map((s) => [s.taskId, s.index, s.start, s.end, s.ended]), [
+    ['t1', 0, at(1), at(10), true], ['t2', 1, at(11), at(20), false], ['t3', 2, at(20), at(100), false],
+  ]);
+  assert.equal(spans[0].task.prompt, 'One');
+});
+
+test('buildTaskSpans falls back to rrweb custom events', () => {
+  const session = { tasks: [{ id: 't1', prompt: 'One' }] };
+  const events = [
+    { type: 4, timestamp: at(0), data: {} },
+    { type: 5, timestamp: at(1), data: { tag: 'testkit:task-start', payload: { taskId: 't1', index: 0 } } },
+    { type: 5, timestamp: at(9), data: { tag: 'testkit:task-end', payload: { taskId: 't1', index: 0 } } },
+  ];
+  const spans = buildTaskSpans({ session, log: [], events });
+  assert.deepEqual(spans.map((s) => [s.taskId, s.start, s.end, s.ended]), [['t1', at(1), at(9), true]]);
+});
+
+function fixture() {
+  const tasks = [
+    { id: 'find', prompt: 'Find a jacket', successHint: 'Results show a jacket', timeLimit: 30, followUp: 'Anything confusing?' },
+    { id: 'about', prompt: 'Open About', successHint: null, timeLimit: null, followUp: null },
+    { id: 'never', prompt: 'Checkout', successHint: null, timeLimit: null, followUp: null },
+  ];
+  const session = {
+    id: 's1', study: 'Checkout study', startedAt: at(0), endedAt: at(120), tasks,
+    meta: { prototypeUrl: 'https://x.test/proto/', commitSha: 'abc1234', userAgent: 'Mozilla/5.0 (Macintosh) Chrome/141.0 Safari/537.36', viewport: { w: 1280, h: 800 } },
+    segments: [{ segmentId: 'g1', url: 'https://x.test/proto/', startedAt: at(0) }],
+    audio: { enabled: true },
+  };
+  const u = 'https://x.test/proto/';
+  const log = [
+    { ts: at(0), type: 'session-start', url: u, taskId: null },
+    { ts: at(1), type: 'task-start', url: u, taskId: 'find' },
+    { ts: at(2), type: 'click', url: u, taskId: 'find', selector: 'input#q', text: '' },
+    { ts: at(3), type: 'input', url: u, taskId: 'find', selector: 'input#q', value: '***' },
+    { ts: at(3.2), type: 'input', url: u, taskId: 'find', selector: 'input#q', value: '***' },
+    { ts: at(5), type: 'click', url: u, taskId: 'find', selector: 'button#apply', text: 'Apply' },
+    { ts: at(5.2), type: 'click', url: u, taskId: 'find', selector: 'button#apply', text: 'Apply' },
+    { ts: at(5.4), type: 'click', url: u, taskId: 'find', selector: 'button#apply', text: 'Apply' },
+    { ts: at(6), type: 'error', url: u, taskId: 'find', message: 'TypeError: x is undefined', stack: 'TypeError: x is undefined\n    at f (app.js:1:2)' },
+    { ts: at(40), type: 'task-end', url: u, taskId: 'find' },
+    { ts: at(41), type: 'followup', url: u, taskId: 'find', answer: 'The filter was empty' },
+    { ts: at(42), type: 'pause', url: u, taskId: null },
+    { ts: at(60), type: 'resume', url: u, taskId: null },
+    { ts: at(61), type: 'task-start', url: u, taskId: 'about' },
+    { ts: at(62), type: 'nav', url: u, taskId: 'about', navType: 'pushState', from: u, to: `${u}about` },
+    { ts: at(63), type: 'nav', url: `${u}about`, taskId: 'about', navType: 'popstate', from: `${u}about`, to: u },
+    { ts: at(64), type: 'audio-gap', url: u, taskId: 'about', gapMs: 1200 },
+    { ts: at(70), type: 'task-end', url: u, taskId: 'about' },
+    { ts: at(80), type: 'rejection', url: u, taskId: null, message: 'Unhandled: nope' },
+    { ts: at(120), type: 'session-end', url: u, taskId: null },
+  ];
+  return { session, log, events: [] };
+}
+
+test('buildSummary: header carries study metadata', () => {
+  const md = buildSummary(fixture());
+  assert.match(md, /^# TestKit session: Checkout study/);
+  for (const line of ['- Prototype: https://x.test/proto/', '- Commit: abc1234', '- Browser: Chrome 141 on macOS', '- Viewport: 1280×800',
+    '- Started: 2025-10-09T08:53:20Z', '- Duration: 02:00 (01:42 active, 00:18 paused)', '- Tasks completed: 2 of 3']) {
+    assert.ok(md.includes(line), `missing: ${line}\n${md}`);
+  }
+});
+
+test('buildSummary: per-task details, trail, and signals', () => {
+  const md = buildSummary(fixture());
+  const task1 = md.slice(md.indexOf('## Task 1'), md.indexOf('## Task 2'));
+  assert.ok(task1.includes('## Task 1: Find a jacket'));
+  assert.ok(task1.includes('- Expected: Results show a jacket'));
+  assert.ok(task1.includes('- Duration: 00:39'));
+  assert.ok(task1.includes('- Time limit: 00:30 (exceeded by 00:09)'));
+  assert.ok(task1.includes('- Follow-up: Anything confusing?'));
+  assert.ok(task1.includes('  - Answer: "The filter was empty"'));
+  assert.ok(task1.includes('00:01 click input#q'));
+  assert.ok(task1.includes('00:02 input input#q = "***" (2 edits)'));
+  assert.ok(task1.includes('- 00:05 error: TypeError: x is undefined (at f (app.js:1:2)) on /proto/'));
+  assert.ok(task1.includes('- Rage click: 3× on button#apply "Apply" at 00:04'));
+  assert.ok(task1.includes('- Long idle: 00:34 without logged interaction from 00:05'));
+  assert.ok(task1.includes('- Time limit exceeded: 00:39 vs 00:30'));
+
+  const task2 = md.slice(md.indexOf('## Task 2'), md.indexOf('## Tasks not reached'));
+  assert.ok(task2.includes('00:01 nav pushState /proto/about'));
+  assert.ok(task2.includes('- Backtracking: back/forward to /proto/ at 00:02'));
+  assert.ok(task2.includes('00:03 audio-gap 1.2s'));
+  assert.ok(!task2.includes('Time limit'));
+});
+
+test('buildSummary: unreached tasks and session-level section', () => {
+  const md = buildSummary(fixture());
+  assert.ok(md.includes('## Tasks not reached\n\n- never: Checkout'));
+  assert.ok(md.includes('- Errors outside tasks: 1'));
+  assert.ok(md.includes('rejection: Unhandled: nope'));
+  assert.ok(md.includes('- Audio gaps: 1 (1.2s total)'));
+  assert.ok(md.includes('- Pauses: 1 (00:18 total)'));
+});
+
+test('buildSummary: paused time inside a task is excluded from its duration', () => {
+  const f = fixture();
+  f.log.splice(5, 0, { ts: at(10), type: 'pause', taskId: null }, { ts: at(30), type: 'resume', taskId: null });
+  f.log.sort((a, b) => a.ts - b.ts);
+  const md = buildSummary(f);
+  assert.ok(md.includes('- Duration: 00:19 (+00:20 paused)'), md);
+  assert.ok(md.includes('- Time limit: 00:30 (within)'));
+  assert.ok(!md.includes('Long idle'), 'idle measured without paused time');
+});
+
+test('buildSummary: survives empty and minimal input', () => {
+  const md = buildSummary({});
+  assert.match(md, /# TestKit session: untitled-study/);
+  assert.ok(md.includes('- Started: n/a'));
+  const noTasks = buildSummary({ session: { study: 'x', startedAt: at(0), endedAt: at(5), audio: { enabled: false } }, log: [] });
+  assert.ok(noTasks.includes('- Audio: not recorded'));
+  assert.ok(noTasks.includes('- Tasks completed: 0 of 0'));
+});
+
+test('buildSummary: unfinished task is marked', () => {
+  const session = { study: 's', startedAt: at(0), endedAt: at(50), tasks: [{ id: 't', prompt: 'P' }] };
+  const md = buildSummary({ session, log: [{ ts: at(1), type: 'task-start', taskId: 't' }, { ts: at(50), type: 'session-end', taskId: null }] });
+  assert.ok(md.includes('- Duration: 00:49 (not ended; session stopped)'));
+  assert.ok(md.includes('(no interactions recorded)'));
+});
+
+test('audio-gap entries from the core: gapMs may be null and carry a message', () => {
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapStart: at(3), gapMs: null, message: 'Microphone unavailable: denied' }, at(0)),
+    '00:03 audio-gap "Microphone unavailable: denied"');
+  const session = { study: 's', startedAt: at(0), endedAt: at(10), audio: { enabled: true } };
+  const md = buildSummary({ session, log: [{ ts: at(2), type: 'audio-gap', gapMs: null, message: 'Microphone unavailable: denied' }] });
+  assert.ok(md.includes('- Audio gaps: 1 (0.0s total, 1 without a measured length)'));
+  assert.ok(md.includes('Microphone unavailable: denied'));
+});

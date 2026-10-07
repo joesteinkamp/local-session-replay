@@ -53,10 +53,12 @@ DB `testkit`, version 1. Object stores:
 | `sessions` | `id` | — | `SessionRecord` |
 | `events` | autoInc | `sessionId` | `{ sessionId, segmentId, ts, events: rrwebEvent[] }` (chunk) |
 | `log` | autoInc | `sessionId` | `LogEntry & { sessionId }` |
-| `audio` | autoInc | `sessionId` | `{ sessionId, audioSegmentId, seq, ts, mime, blob }` |
+| `audio` | autoInc | `sessionId` | `{ sessionId, audioSegmentId, seq, ts, startTs, mime, blob }` (`ts` = chunk arrival; `startTs` = its segment's start) |
 
 `localStorage['testkit:active']` = id of the in-progress session (absent when none).
 The loader reads it synchronously to stay active across navigation without `?test=1`.
+`localStorage['testkit:last']` = id of the most recent *stopped* session that hasn't
+been discarded, so a reload (with `?test=1`) can still export it.
 
 ```js
 SessionRecord = {
@@ -67,10 +69,15 @@ SessionRecord = {
   config,                          // normalized config snapshot
   meta: { prototypeUrl, commitSha, userAgent, viewport:{w,h}, consentAt },
   segments: [{ segmentId, url, startedAt }],   // one per page load
-  audio: { enabled, mime|null },
+  audio: { enabled, mime|null },  // enabled = mic actually in use (false if declined/denied)
   muted: boolean,
+  pausedMs,                        // accumulated paused time (survives reloads)
+  pausedAt|null,                   // start of the current pause
+  taskStartedAt|null,              // current task start, shifted forward by pauses
+  tasksCompleted,                  // tasks ended via nextTask()
 }
 ```
+`phase: 'preflight'` is never persisted — preflight is in-memory only.
 
 Store API (all async):
 `openStore()`, `createSession(rec)`, `getSession(id)`, `updateSession(id, patch)`,
@@ -79,6 +86,12 @@ Store API (all async):
 (events flattened and sorted by `timestamp`; log sorted by `ts`; audio grouped:
 `[{ audioSegmentId, startTs, endTs, mime, blob }]` with chunks concatenated in `seq` order),
 `deleteSession(id)`.
+Also: `flush()` (write buffered events/log now; never rejects), `onError(fn) → off`
+(write failures given up on after retries), `lastAudioChunk(sessionId)`,
+`get/set/clearActiveSessionId()`, `get/set/clearLastSessionId()`, and the pure
+helper `elapsedMsFor(sessionRecord, now)`. `appendEvents`/`appendLog` buffer in
+memory and resolve once written (≤2 s, immediately after a full snapshot, and on
+pagehide / visibilitychange→hidden); they never reject.
 
 ## Log entry (`src/core/interaction-log.js`)
 
@@ -91,6 +104,8 @@ LogEntry = {
   message?, stack?,          // errors
   from?, to?, navType?,      // navigation: 'load'|'pushState'|'replaceState'|'popstate'|'hashchange'|'beforeunload'
   answer?,                   // followUp
+  source?,                   // error/rejection: 'window'|'resource'|'console'|'promise'
+  gapStart?, gapMs?,         // audio-gap: last audio ts before the gap, gap length (null if mic unavailable)
 }
 type ∈ 'click'|'input'|'change'|'submit'|'nav'|'error'|'rejection'|
        'session-start'|'session-resume'|'task-start'|'task-end'|'followup'|
@@ -98,7 +113,10 @@ type ∈ 'click'|'input'|'change'|'submit'|'nav'|'error'|'rejection'|
 ```
 
 Events originating inside the overlay (its shadow host carries class
-`testkit-block`) are never logged.
+`testkit-block`) are never logged. Input values: `'***'` when masked and
+non-empty, `''` when empty; passwords always masked; checkbox/radio log
+`'true'`/`'false'` even when masking (as rrweb records checked state).
+`console.error` calls are logged as `error` with `source: 'console'`.
 
 ## rrweb custom events
 
@@ -131,9 +149,19 @@ controller.nextTask({ followUpAnswer? })   // ends current task; after last task
 controller.pause() / controller.resume()
 controller.toggleMute()
 controller.stop()                          // → stopped
-controller.exportSession() → Promise<{ filename, bytes }>   // stopped → exporting → stopped; triggers download
+controller.exportSession() → Promise<{ filename, bytes }>   // stopped → exporting → stopped; triggers download; rejects on failure (and sets state.error)
 controller.discard()                       // deletes session data → idle
 ```
+
+All methods return promises and are serialized; calls in the wrong phase are
+no-ops. `beginPreflight()` is also allowed from `stopped` (the stopped session's
+data is kept until discarded). `start()` without `consent: true` sets `error`.
+On boot the controller may also land in `stopped` (restored from `testkit:last`).
+`getState()` also returns `tasksCompleted` (tasks ended via `nextTask()`, persisted)
+and `taskElapsedMs` (current task time excluding paused time) — implementing the
+overlay requests below.
+`state.audio.enabled` reflects the tester's choice, so a denied mic shows as
+`{ enabled: true, status: 'denied' }`.
 
 On boot, if `localStorage['testkit:active']` names a session in
 `recording`/`paused`, the controller resumes it automatically (new segment,
@@ -192,3 +220,14 @@ Called once per page load after `document.body` exists and after
 id="testkit-root">` appended to `<html>` (not `<body>`, so prototype body
 re-renders can't remove it). Everything inside the shadow root is excluded from
 rrweb (`blockClass: 'testkit-block'`) and from the interaction log.
+
+Overlay-owned storage: `localStorage['testkit:overlay-pos']` = `{ side: 'left'|'right', y }`
+(bubble position, survives navigation); `sessionStorage['testkit:overlay-open']` =
+`'1'|'0'` (panel expanded, per tab). Key events inside the overlay stop at the shadow
+root so prototype shortcuts never fire while typing in it.
+
+## Requests from overlay
+
+None open. `tasksCompleted` and `taskElapsedMs` (requested 2026-10-06) are now part
+of the Controller contract above; the overlay prefers them and keeps its local
+fallbacks only for older controllers.
