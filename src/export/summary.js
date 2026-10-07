@@ -436,7 +436,8 @@ export function buildSummary({ session = {}, log = [], events = [], audio } = {}
       signals.push(`- Long idle: ${formatDuration(idle.durationMs)} without logged interaction from ${clock(idle.start - span.start)}${idle.activity ? ' (pointer/scroll activity seen; likely reading)' : ''}`);
     }
     if (task.timeLimit && active > task.timeLimit * 1000) signals.push(`- Time limit exceeded: ${formatDuration(active)} vs ${formatDuration(task.timeLimit * 1000)}`);
-    for (const g of gaps.filter((gap) => gap.end > span.start && gap.start < span.end)) {
+    // A gap straddling a task boundary can leave a sliver on one side; skip those.
+    for (const g of gaps.filter((gap) => Math.min(gap.end, span.end) - Math.max(gap.start, span.start) >= 100)) {
       const from = Math.max(g.start, span.start);
       const len = g.durationMs === null ? 'unknown length' : `${((Math.min(g.end, span.end) - from) / 1000).toFixed(1)}s`;
       signals.push(`- Audio gap: ${len} from ${clock(from - span.start)}${g.reason ? ` (${g.reason})` : ''}`);
