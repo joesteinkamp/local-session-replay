@@ -16,7 +16,7 @@ downloaded when testing is active, so casual viewers pay ~1 KB.
 ### 1. Bundled apps (Vite, webpack, Next, …): install from GitHub
 
 ```sh
-npm i -D github:<you>/local-session-replay   # pin a tag: …/local-session-replay#v1.0.0
+npm i -D github:joesteinkamp/local-session-replay   # pin a tag: …/local-session-replay#v1.0.0
 ```
 
 ```js
@@ -54,7 +54,7 @@ the package manager must be allowed to run it:
 ### 2. Plain HTML: script tag from GitHub Pages
 
 ```html
-<script src="https://<you>.github.io/local-session-replay/v1/testkit.js"></script>
+<script src="https://joesteinkamp.github.io/local-session-replay/v1/testkit.js"></script>
 <script>
   TestKit.init({
     study: 'grid-filters-v2',
