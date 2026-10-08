@@ -54,8 +54,13 @@ Open the app with `?test=1`. Props are the [config](#config-reference). The
 component renders nothing itself; the overlay lives in its own Shadow DOM.
 React 18 and 19 are supported. `examples/react/` is a working Vite app.
 
-- **Mount it first**, before the prototype, so it reads `?test=1` before any
-  sibling effect (a router redirect, say) can strip the query string.
+- **Mount it first**, before the prototype. It reads `?test=1` in a
+  `useEffect`, and React runs that before the `useEffect`s of later siblings
+  (and their children) and of its parents, so an effect-based redirect there
+  can't strip the query string first. Redirects that run earlier still can:
+  `useLayoutEffect`, during render, router loaders, or on the server. Keep the
+  `test` param in those redirects. Once a session is in progress it survives
+  navigation without the param.
 - **Configuration is read once.** The first committed `<TestKit />` on the page
   owns the configuration, even when it decides not to activate. Later prop
   changes, remounts (StrictMode, HMR), and other copies are ignored. Reload the

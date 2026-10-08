@@ -34,7 +34,9 @@ export default function App() {
 
   return (
     <>
-      {/* Mount first, so it reads ?test=1 before any other effect can change the URL. */}
+      {/* Mount first: its effect reads ?test=1 before later siblings' useEffects
+          run. Layout-effect, render-time, and loader redirects run earlier; keep the
+          `test` param in those. */}
       <TestKit study="grid-filters-react" tasks={tasks} />
       <header>
         <strong>Prototype</strong>
