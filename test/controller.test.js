@@ -819,3 +819,18 @@ test('a double click on Skip/Next advances once: a call for a task that is no lo
   assert.equal(s.tasksCompleted, 2);
   assert.equal(store.log.filter((e) => e.type === 'task-end').length, 3);
 });
+
+test('free exploration (no tasks): nextTask() and skipTask() record nothing and keep recording', async () => {
+  const { deps } = fakeDeps();
+  const store = memoryStore();
+  const controller = await createController({ config: normalizeConfig({ study: 'study-a', tasks: [] }), store, deps });
+  await controller.beginPreflight();
+  await controller.start({ consent: true, audio: false });
+  await controller.nextTask();
+  await controller.skipTask();
+  const s = controller.getState();
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.tasksCompleted, 0);
+  assert.equal(s.tasksSkipped, 0);
+  assert.equal(store.log.filter((e) => e.type === 'task-end').length, 0);
+});

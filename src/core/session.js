@@ -601,9 +601,11 @@ export async function createController({ config, store, deps = {} }) {
   async function advance({ skipped, followUpAnswer, taskIndex }) {
     if (state.phase !== 'recording') return;
     if (taskIndex != null && taskIndex !== session.taskIndex) return;
-    flushInputs();
+    // Free exploration (no tasks): nothing to end or count; Finish is stop().
     const task = currentTask();
-    if (!skipped && task && followUpAnswer != null && String(followUpAnswer).trim()) {
+    if (!task) return;
+    flushInputs();
+    if (!skipped && followUpAnswer != null && String(followUpAnswer).trim()) {
       log('followup', { taskId: task.id, text: clip(task.followUp || ''), answer: String(followUpAnswer).trim().slice(0, MAX_ANSWER) });
     }
     endTask(skipped ? { completed: false, reason: 'skipped' } : { completed: true });

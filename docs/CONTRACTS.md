@@ -254,6 +254,7 @@ controller.start({ consent: true, audio: boolean }) // preflight → recording, 
 controller.nextTask({ followUpAnswer?, taskIndex? })   // ends current task; after last task → stop()
 controller.skipTask({ taskIndex? })        // like nextTask(), but task-end {completed:false, reason:'skipped'}, counts tasksSkipped, no follow-up
                                            // taskIndex = the task the click was for; a call whose taskIndex is no longer current is a no-op (double click)
+                                           // both are no-ops without a current task (free exploration, tasks: []): Finish there is stop()
 controller.pause() / controller.resume()
 controller.toggleMute()
 controller.retryMic() → Promise<{ ok, error?, persistent?, stale? }>  // recording/paused; not queued (see Audio state)
