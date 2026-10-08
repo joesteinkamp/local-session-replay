@@ -12,6 +12,11 @@ import { findRemoteAssets } from './assets.js';
 const SEEK_STEP_MS = 5000;
 const SEEK_PAGE_MS = 30000;
 const DRIFT_TOLERANCE_S = 0.3;
+// play() takes a moment to produce sound while the replayer keeps going, so
+// the element starts behind by that latency × speed (measured ≈250 ms at 1×
+// in Chrome). Once it is actually playing, it gets one tighter correction.
+const SETTLE_TOLERANCE_S = 0.08;
+const SETTLE_DELAY_MS = 250;
 // Chrome and Firefox mute media above 4× (and speech is unintelligible anyway).
 const MAX_AUDIBLE_RATE = 4;
 const MIN_SKIPPABLE_PAUSE_MS = 1500;
@@ -95,7 +100,10 @@ function createAudioSync(segments, { onStatus }) {
 
   const items = segments.map((seg, i) => {
     const el = h('audio', { preload: 'auto' });
-    const item = { seg, el, index: i, ready: false, failed: false };
+    const item = { seg, el, index: i, ready: false, failed: false, settleAt: null };
+    el.addEventListener('playing', () => {
+      item.settleAt = performance.now() + SETTLE_DELAY_MS;
+    });
     // MediaRecorder WebM has no duration/cues; seeking far forward once makes
     // the browser index the file so later seeks land correctly.
     el.addEventListener('loadedmetadata', () => {
@@ -169,8 +177,13 @@ function createAudioSync(segments, { onStatus }) {
       status(`rate-${speed}`, `Audio can't play at ${speed}×`, true);
       return;
     }
+    const drift = Math.abs(it.el.currentTime - target);
     if (it.el.ended && target < it.el.duration - DRIFT_TOLERANCE_S) it.el.currentTime = target;
-    else if (!it.el.seeking && Math.abs(it.el.currentTime - target) > DRIFT_TOLERANCE_S) it.el.currentTime = target;
+    else if (!it.el.seeking && drift > DRIFT_TOLERANCE_S) it.el.currentTime = target;
+    else if (!it.el.seeking && !it.el.paused && it.settleAt !== null && performance.now() >= it.settleAt) {
+      it.settleAt = null;
+      if (drift > SETTLE_TOLERANCE_S) it.el.currentTime = target;
+    }
     it.el.volume = volume;
     it.el.muted = muted;
     if (it.el.paused && !it.el.ended) {

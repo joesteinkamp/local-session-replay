@@ -71,9 +71,10 @@ export function sortLog(entries) {
  * Chunks are written one transaction each, so one can go missing (aborted at
  * unload, failed write). Without seq 0 (the container header) the rest is
  * undecodable, so that segment is dropped and reported in `dropped`. A hole
- * later on is kept and reported as `seqGaps` (missing seq numbers): the
- * browsers tested play up to the hole, so trimming would only lose audio
- * (see docs/audio-matrix.md).
+ * later on is kept and reported as `seqGaps` (missing seq numbers): Chrome
+ * plays such a file through to the end with its timestamps intact, so
+ * trimming would only lose audio (docs/audio-matrix.md; Firefox and Safari
+ * are still unmeasured).
  */
 export function groupAudioChunksReport(chunks) {
   const bySegment = new Map();

@@ -69,6 +69,15 @@ export async function classifyMicError(err) {
   return { ...base, persistent: false };
 }
 
+/** Permissions API state for the mic without prompting: 'granted' | 'denied' | 'prompt' | null. */
+export async function micPermissionState() {
+  try {
+    return (await navigator.permissions.query({ name: 'microphone' })).state;
+  } catch {
+    return null; // Firefox has no 'microphone' permission name
+  }
+}
+
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

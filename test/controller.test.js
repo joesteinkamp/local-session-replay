@@ -575,3 +575,36 @@ test('stopped state carries the saved-audio verdict from persisted segments', as
   assert.equal(none.controller.getState().savedAudio.kind, 'none');
   assert.equal(none.controller.getState().savedAudio.label, 'No audio recorded');
 });
+
+test('export: audio too large to encode → exact copy, Download without audio offered and works', async () => {
+  const { store, controller } = await startSession({ audio: true });
+  await controller.stop();
+  const rec = savedSession(store);
+  const broken = { arrayBuffer: async () => { throw new RangeError('Invalid string length'); }, type: 'audio/webm', size: 1 };
+  store.loadSessionData = async () => ({
+    session: structuredClone(rec), events: [{ type: 4, timestamp: rec.startedAt }], log: [],
+    audio: [{ audioSegmentId: 'a', startTs: rec.startedAt, endTs: rec.endedAt, mime: 'audio/webm', blob: broken }], audioDropped: [],
+  });
+  await assert.rejects(controller.exportSession(), { message: 'The session file is too large to include the audio. Download the visual replay without audio instead.' });
+  assert.equal(controller.getState().exportWithoutAudio, true);
+  assert.equal(controller.getState().phase, 'stopped');
+  const clicked = [];
+  const saved = { createElement: document.createElement, documentElement: document.documentElement };
+  document.createElement = () => ({ style: {}, click() { clicked.push(this.download); }, remove() {} });
+  document.documentElement = { appendChild: noop };
+  // download() revokes the object URL after 60 s; don't hold the test process open.
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    const t = realSetTimeout(fn, ms, ...args);
+    if (ms >= 60_000) t.unref?.();
+    return t;
+  };
+  try {
+    const res = await controller.exportSession({ withoutAudio: true });
+    assert.equal(res.withoutAudio, true);
+    assert.equal(clicked.length, 1);
+  } finally {
+    Object.assign(document, saved);
+    globalThis.setTimeout = realSetTimeout;
+  }
+});

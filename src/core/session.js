@@ -9,7 +9,7 @@
 
 import { createRecorder } from './recorder.js';
 import { createInteractionLog } from './interaction-log.js';
-import { classifyMicError, createAudioCapture, pickMimeType } from './audio.js';
+import { classifyMicError, createAudioCapture, micPermissionState, pickMimeType } from './audio.js';
 import { clip } from './selector.js';
 import { elapsedMsFor } from './store.js';
 import { exportSession as buildExport } from '../export/exporter.js';
@@ -516,6 +516,15 @@ export async function createController({ config, store, deps = {} }) {
     await reconnectAudio({ gapStart, isCurrent, waiting: 'pending' });
   }
 
+  // A later page of a session that stopped asking after a denial: say
+  // "blocked" (with the site-settings help) rather than "off", without asking.
+  async function showRememberedDenial() {
+    if (!session?.audio?.enabled || !session.audio.stopAsking || !captureConfig().audio.enabled) return;
+    const id = session.id;
+    if ((await micPermissionState()) !== 'denied' || session?.id !== id || state.audio.status !== 'off') return;
+    setAudio({ status: 'denied', error: 'Microphone access was denied' });
+  }
+
   // Pre-download "saved audio" verdict, from persisted segments only and
   // through the same audioReport() the export's summary and player use.
   async function refreshSavedAudio() {
@@ -604,6 +613,7 @@ export async function createController({ config, store, deps = {} }) {
       log('session-resume', {});
       startTicker();
       if (micWanted()) restartAudioAfterNavigation().catch(reportError);
+      else showRememberedDenial().catch(() => {});
     } else {
       // Paused: nothing is captured until resume(), which also re-acquires the
       // mic. Release any stream a bfcache restore brought back.
