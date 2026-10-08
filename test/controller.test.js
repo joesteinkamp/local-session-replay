@@ -746,6 +746,7 @@ test('Start new session from stopped: cancel returns to the stopped session; sta
   assert.equal(controller.getState().downloaded, false);
   await controller.beginPreflight();
   assert.equal(controller.getState().phase, 'preflight');
+  assert.equal(controller.getState().previousDownloadedAt, null);
   assert.equal(store.getLastSessionId('study-a'), oldId, 'still exportable after a reload during setup');
   await controller.cancelPreflight();
   assert.equal(controller.getState().phase, 'stopped');
@@ -773,6 +774,7 @@ test('a downloaded session is marked, survives a reload as downloaded, and is de
   assert.equal(reloaded.getState().downloaded, true);
   await reloaded.beginPreflight();
   assert.equal(reloaded.getState().downloaded, false, 'setup is a fresh state');
+  assert.equal(reloaded.getState().previousDownloadedAt, store.sessions.get(oldId).exportedAt, 'setup says when the previous file was downloaded');
   assert.ok(store.sessions.has(oldId), 'kept through setup');
   await reloaded.start({ consent: true, audio: false });
   assert.equal(store.sessions.has(oldId), false);

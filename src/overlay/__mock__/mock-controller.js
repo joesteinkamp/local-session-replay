@@ -45,7 +45,7 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
     beginPreflight() {
       if (state.phase !== 'idle' && state.phase !== 'stopped') return;
       previous = state.phase === 'stopped' ? state : null;
-      set({ phase: 'preflight', sessionId: 'mock-1', downloaded: false, downloadedWithoutAudio: false, savedAudio: null });
+      set({ phase: 'preflight', sessionId: 'mock-1', downloaded: false, downloadedWithoutAudio: false, savedAudio: null, previousDownloadedAt: previous?.downloaded ? Date.now() : null });
     },
     cancelPreflight() {
       if (previous) {

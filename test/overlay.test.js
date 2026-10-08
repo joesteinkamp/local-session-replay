@@ -15,6 +15,7 @@ import {
   audioNotice,
   micKind,
   parsePosition,
+  previousDownloadText,
   savedAudioText,
   snapPosition,
   taskRemainingMs,
@@ -171,4 +172,11 @@ test('taskTally: skipped tasks are counted apart from completed ones', () => {
   assert.equal(taskTally({ tasks, tasksCompleted: 3, tasksSkipped: 0 }), '3 of 3 completed');
   assert.equal(tasksSkipped({ tasks }), 0, 'older controllers report no skips');
   assert.equal(tasksSkipped({ tasks, tasksSkipped: 9 }), 3);
+});
+
+test('previousDownloadText: says when the previous file was handed to the browser, only if it was', () => {
+  assert.equal(previousDownloadText(null), null);
+  const text = previousDownloadText(new Date(2026, 9, 8, 14, 12).getTime());
+  assert.match(text, /downloaded at .*12/);
+  assert.match(text, /Cancel to download it again/);
 });

@@ -104,6 +104,18 @@ export function tasksCompleted(state, { finishedLast = false } = {}) {
   return clamp(state.taskIndex ?? 0, 0, total);
 }
 
+// Local wall-clock time, e.g. "14:12" (or "2:12 PM", per the browser's locale).
+export function formatClock(ts) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Setup line after "Start new session" from a downloaded session. JS only knows
+// the file was handed to the browser, so the tester gets a chance to check.
+export function previousDownloadText(ts) {
+  if (!Number.isFinite(ts)) return null;
+  return `The previous session’s file was downloaded at ${formatClock(ts)}. If it isn’t in your downloads folder, choose Cancel to download it again.`;
+}
+
 // Tasks the tester skipped (controller count; older controllers report none).
 export function tasksSkipped(state) {
   const total = state.tasks?.length || 0;

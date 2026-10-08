@@ -242,6 +242,7 @@ controller.getState() → {
   exportWithoutAudio,           // true after the audio could not be encoded into the file
   downloaded,                   // stopped only: SessionRecord.exportedAt is set (persisted, survives reloads)
   downloadedWithoutAudio,       // stopped only: exportedWithoutAudioAt is set (the audio exists only in IndexedDB)
+  previousDownloadedAt,         // preflight only: exportedAt of the stopped session this setup replaces, else null
   otherTab,                     // true when another tab is capturing this session (read-only here)
   error|null,
 }
@@ -293,6 +294,17 @@ show again. The active pointer and stale logic are untouched: they only ever
 name a `recording`/`paused` session. `exportedAt` is written with
 `store.updateSession()` directly, not `persist()`, so a stopped session never
 regains a mirror.
+
+**"Downloaded" is best-effort.** `exportedAt` means `download()` handed the file
+to the browser (`<a download>` click). A blocked download, a cancelled Save
+dialog or a full disk is invisible to the page, so it still counts. Mitigation:
+setup started from a downloaded session gets `state.previousDownloadedAt`, and
+the overlay says "The previous session’s file was downloaded at HH:MM. If it
+isn’t in your downloads folder, choose Cancel to download it again." Cancel
+returns to that session; it is deleted only when the new session starts.
+(Rejected for now: holding the old session until the new one has recorded
+something meaningful, which needs a definition of "meaningful" and leaves two
+sessions in storage.)
 `state.audio.enabled` reflects the tester's choice, so a denied mic shows as
 `{ enabled: true, status: 'denied' }`. A *dismissed* prompt (Permissions API
 reports `prompt` after `NotAllowedError`) shows as `denied` with error

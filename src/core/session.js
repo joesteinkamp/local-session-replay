@@ -117,6 +117,7 @@ export async function createController({ config, store, deps = {} }) {
       exportWithoutAudio: false,
       downloaded: false,
       downloadedWithoutAudio: false,
+      previousDownloadedAt: null,   // preflight only: when the session this setup replaces was downloaded
       otherTab: false,
       error: null,
     };
@@ -835,7 +836,9 @@ export async function createController({ config, store, deps = {} }) {
         // the new session actually starts; see start().
         if (state.phase === 'stopped') previous = session;
         session = null;
-        set({ ...idleState(), phase: 'preflight' });
+        // "Downloaded" only means the file was handed to the browser; setup
+        // shows when, so a tester can notice a save that never landed.
+        set({ ...idleState(), phase: 'preflight', previousDownloadedAt: previous?.exportedAt ?? null });
       });
     },
 

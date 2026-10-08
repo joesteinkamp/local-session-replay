@@ -1158,6 +1158,8 @@ scenarios.I = async (browser) => {
   // Downloaded: Start new session goes straight to setup; Cancel comes back.
   await fid(page, 'new-session').click();
   await waitPhase(page, 'preflight');
+  r.previousNotice = await page.locator('[data-previous-download]').textContent();
+  assert.match(r.previousNotice, /previous session’s file was downloaded at/);
   await fid(page, 'cancel').click();
   await waitPhase(page, 'stopped');
   r.backToSame = (await state(page)).sessionId === firstId;

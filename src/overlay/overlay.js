@@ -21,6 +21,7 @@ import {
   audioNotice,
   micKind,
   parsePosition,
+  previousDownloadText,
   savedAudioText,
   snapPosition,
   taskRemainingMs,
@@ -565,7 +566,7 @@ function mount(controller) {
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
       state.audio?.stopAsking, state.audio?.deviceChanged, state.savedAudio, state.exportWithoutAudio,
-      state.downloaded, state.downloadedWithoutAudio, state.tasksCompleted, state.tasksSkipped,
+      state.downloaded, state.downloadedWithoutAudio, state.previousDownloadedAt, state.tasksCompleted, state.tasksSkipped,
       ui.micHelp, ui.retrying,
       state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
@@ -840,8 +841,10 @@ function mount(controller) {
     if (!ui.pre.consent) needs.push('check the consent box');
     if (audioEnabled && !ui.pre.micPassed && !ui.pre.audioSkipped) needs.push('pass the microphone check (or continue without audio)');
 
+    const previous = previousDownloadText(state.previousDownloadedAt);
     return [
       h('h2', { class: 'tk-h', text: 'Before you start' }),
+      previous ? h('p', { class: 'tk-notice', 'data-previous-download': '' }, previous) : null,
       h('p', { class: 'tk-p is-strong', id: 'tk-consent-text', text: consentText(withAudio) }),
       h(
         'label',
