@@ -404,7 +404,7 @@ scenarios.A = async (browser) => {
   r.pausedBadgeNotLive = (await state(page)).audio.status !== 'live';
   r.pauseCopy = await page.locator('.tk-notice.is-warn').first().textContent();
   await sleep(2500);
-  await fid(page, 'pause').click(); // Resume
+  await fid(page, 'resume').click();
   const resumeAt = Date.now();
   await waitAudio(page, 'live');
   await sleep(2500);
@@ -933,7 +933,7 @@ async function seqGapPipeline(browser) {
   await sleep(4500);
   await fid(page, 'pause').click();
   await waitPhase(page, 'paused');
-  await fid(page, 'pause').click();
+  await fid(page, 'resume').click();
   await waitAudio(page, 'live');
   await sleep(5000);
   await openPanel(page);
@@ -1122,6 +1122,17 @@ scenarios.I = async (browser) => {
   await openPanel(page);
   await fid(page, 'start').click();
   await startScreenOnly();
+  // The pause toggle's data-fid follows its label, and keyboard focus stays on it.
+  await fid(page, 'pause').focus();
+  await page.keyboard.press('Enter');
+  await waitPhase(page, 'paused');
+  r.pausedToggle = await page.evaluate(() => document.querySelector('#testkit-root').shadowRoot.activeElement?.dataset.fid);
+  r.pausedLabel = await fid(page, 'resume').textContent();
+  await page.keyboard.press('Enter');
+  await waitPhase(page, 'recording');
+  r.resumedToggle = await page.evaluate(() => document.querySelector('#testkit-root').shadowRoot.activeElement?.dataset.fid);
+  assert.deepEqual([r.pausedToggle, r.pausedLabel, r.resumedToggle], ['resume', 'Resume', 'pause']);
+  assert.equal(await fid(page, 'pause').textContent(), 'Pause');
   // Double clicks advance once, including on the second-to-last task.
   await fid(page, 'skip-task').dblclick();
   await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 1, null, { what: 'task 2' });
@@ -1197,6 +1208,8 @@ scenarios.J = async (browser) => {
   const r = {};
   const context = await browser.newContext({ acceptDownloads: true });
   const page = await context.newPage();
+  const sourceRequests = [];
+  page.on('request', (req) => /testkit-player-source/.test(req.url()) && sourceRequests.push(new URL(req.url()).pathname));
   await page.goto(`${DEMO}/index.html?test=1`);
   await page.locator('#testkit-root').waitFor({ state: 'attached' });
   await page.evaluate(async () => {
@@ -1224,12 +1237,11 @@ scenarios.J = async (browser) => {
   await page.evaluate(() => history.pushState(null, '', '/demo/app/deep/route'));
   await page.evaluate(() => window.TestKit.controller.stop());
   await waitPhase(page, 'stopped');
-  const sourceRequests = [];
-  page.on('request', (req) => /testkit-player-source/.test(req.url()) && sourceRequests.push(new URL(req.url()).pathname));
   await openPanel(page);
   const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
   r.playerSourceRequests = sourceRequests;
-  assert.deepEqual(sourceRequests, ['/v1/testkit-player-source.js'], 'loaded next to testkit-core.js, once, at export');
+  // Prefetched at start (before the pushState), next to testkit-core.js; the export reuses it.
+  assert.deepEqual(sourceRequests, ['/v1/testkit-player-source.js'], 'loaded next to testkit-core.js, once');
   const file = path.join(outDir, 'J-order.html');
   await download.saveAs(file);
   const payload = await readExport(file);
@@ -1250,9 +1262,10 @@ scenarios.J = async (browser) => {
 scenarios.K = async (browser) => {
   const r = {};
   const distDir = path.join(root, 'dist');
-  const context = await browser.newContext({ acceptDownloads: true });
-  await context.route(`${ORIGIN}/pkg/**`, async (route) => {
+  const net = { blockPlayer: false };
+  const routePackageApp = (context) => context.route(`${ORIGIN}/pkg/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
+    if (net.blockPlayer && /\/chunks\/testkit-player-/.test(pathname)) return route.abort('internetdisconnected');
     if (pathname.startsWith('/pkg/dist/')) {
       const file = path.join(distDir, pathname.slice('/pkg/dist/'.length));
       if (!file.startsWith(distDir) || !existsSync(file)) return route.fulfill({ status: 404, body: 'not found' });
@@ -1268,7 +1281,11 @@ scenarios.K = async (browser) => {
         </script></head><body><main><h1>Package app</h1><button id="go">Go</button></main></body></html>`,
     });
   });
+  const context = await browser.newContext({ acceptDownloads: true });
+  await routePackageApp(context);
   const page = await context.newPage();
+  const playerChunks = [];
+  page.on('request', (req) => /testkit-player-/.test(req.url()) && playerChunks.push(new URL(req.url()).pathname));
   await page.goto(`${ORIGIN}/pkg/app/?test=1`);
   await page.locator('#testkit-root').waitFor({ state: 'attached', timeout: 15_000 });
   r.search = await page.evaluate(() => location.search);
@@ -1281,8 +1298,6 @@ scenarios.K = async (browser) => {
   await page.evaluate(() => history.pushState(null, '', '/pkg/app/elsewhere/deeper'));
   await page.evaluate(() => window.TestKit.controller.stop());
   await waitPhase(page, 'stopped');
-  const playerChunks = [];
-  page.on('request', (req) => /testkit-player-/.test(req.url()) && playerChunks.push(new URL(req.url()).pathname));
   await openPanel(page);
   const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
   const file = path.join(outDir, 'K-package.html');
@@ -1298,6 +1313,230 @@ scenarios.K = async (browser) => {
   assert.ok(r.clickLogged);
   assert.ok(r.playerLoaded);
   await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+
+  // The player chunk fails (prefetch and export): Chrome caches the failed
+  // import() for the page, so the retry reloads into the stopped session.
+  net.blockPlayer = true;
+  const ctx2 = await browser.newContext({ acceptDownloads: true });
+  await routePackageApp(ctx2);
+  const p2 = await ctx2.newPage();
+  await p2.goto(`${ORIGIN}/pkg/app/?test=1`);
+  await p2.locator('#testkit-root').waitFor({ state: 'attached', timeout: 15_000 });
+  await p2.evaluate(async () => {
+    const c = window.TestKit.controller;
+    await c.beginPreflight();
+    await c.start({ consent: true, audio: false });
+  });
+  await p2.evaluate(() => history.pushState(null, '', '/pkg/app/elsewhere'));
+  await p2.evaluate(() => window.TestKit.controller.stop());
+  await waitPhase(p2, 'stopped');
+  const stoppedId = (await state(p2)).sessionId;
+  await openPanel(p2);
+  await fid(p2, 'download').click();
+  await waitFor(p2, () => window.TestKit.controller.getState().exportNeedsReload === true, null, { what: 'exportNeedsReload' });
+  r.reloadCopy = await p2.locator('.tk-notice.is-error').first().textContent();
+  r.retryLabel = await fid(p2, 'download').textContent();
+  net.blockPlayer = false; // back online
+  // Precondition (the bug): an in-page retry still fails, with no request made.
+  let retryRequests = 0;
+  const countRetry = (req) => /testkit-player-/.test(req.url()) && retryRequests++;
+  p2.on('request', countRetry);
+  r.inPageRetry = await p2.evaluate(() => window.TestKit.controller.exportSession().then(() => 'ok', (e) => e.message));
+  p2.off('request', countRetry);
+  r.inPageRetryRequests = retryRequests;
+  assert.notEqual(r.inPageRetry, 'ok', 'an in-page retry cannot recover (cached failed import)');
+  await Promise.all([p2.waitForEvent('load'), fid(p2, 'download').click()]);
+  r.reloadedUrl = await p2.evaluate(() => location.pathname + location.search);
+  await p2.locator('#testkit-root').waitFor({ state: 'attached', timeout: 15_000 });
+  await waitPhase(p2, 'stopped');
+  r.sameSession = (await state(p2)).sessionId === stoppedId;
+  await openPanel(p2);
+  const [dl2] = await Promise.all([p2.waitForEvent('download'), fid(p2, 'download').click()]);
+  const file2 = path.join(outDir, 'K-package-after-reload.html');
+  await dl2.saveAs(file2);
+  r.afterReloadSessionId = (await readExport(file2)).session.id;
+  assert.equal(r.reloadCopy, 'The replay player couldn’t load. Reload and download again — your session is saved.');
+  assert.equal(r.retryLabel, 'Reload and retry');
+  assert.ok(r.sameSession, 'reloaded into the stopped session');
+  assert.equal(r.afterReloadSessionId, stoppedId);
+  await p2.evaluate(() => window.TestKit.controller.discard());
+  await ctx2.close();
+  return r;
+};
+
+// L: the player is prefetched when recording starts, so an export works with
+// the player URL blocked afterwards (tester offline); blocked from the start,
+// the export fails with a clear error. Casual viewers never fetch it.
+scenarios.L = async (browser) => {
+  const r = {};
+  const PLAYER = '**/v1/testkit-player-source.js';
+  const requests = [];
+  const run = async ({ blockFromStart }) => {
+    const context = await browser.newContext({ acceptDownloads: true });
+    if (blockFromStart) await context.route(PLAYER, (route) => route.abort('internetdisconnected'));
+    const page = await context.newPage();
+    page.on('request', (req) => /testkit-player-source/.test(req.url()) && requests.push(blockFromStart ? 'blocked-run' : 'cached-run'));
+    await page.goto(`${DEMO}/index.html?test=1`);
+    await page.locator('#testkit-root').waitFor({ state: 'attached' });
+    await page.evaluate(async () => {
+      const c = window.TestKit.controller;
+      await c.beginPreflight();
+      await c.start({ consent: true, audio: false });
+    });
+    await sleep(1000);
+    if (!blockFromStart) await context.route(PLAYER, (route) => route.abort('internetdisconnected')); // goes offline after start
+    await page.evaluate(() => window.TestKit.controller.stop());
+    await waitPhase(page, 'stopped');
+    await openPanel(page);
+    return { context, page };
+  };
+
+  // Casual viewer: no ?test=1, no player request.
+  const casual = await browser.newContext();
+  const viewer = await casual.newPage();
+  let casualRequests = 0;
+  viewer.on('request', (req) => /testkit-player|testkit-core/.test(req.url()) && casualRequests++);
+  await viewer.goto(`${DEMO}/index.html`);
+  await sleep(500);
+  await casual.close();
+  r.casualRequests = casualRequests;
+
+  {
+    const { context, page } = await run({ blockFromStart: false });
+    const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+    const file = path.join(outDir, 'L-offline.html');
+    await download.saveAs(file);
+    const player = await openPlayer(context, file);
+    r.cachedExportPlays = await player.evaluate(() => !!window.TestKitPlayer?.data);
+    await player.close();
+    await page.evaluate(() => window.TestKit.controller.discard());
+    await context.close();
+  }
+  {
+    const { context, page } = await run({ blockFromStart: true });
+    await fid(page, 'download').click();
+    await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).waitFor({ timeout: 10_000 });
+    r.blockedError = await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).textContent();
+    r.blockedPhase = (await state(page)).phase;
+    r.blockedRetryLabel = await fid(page, 'download').textContent(); // script path: in-page retry
+    await page.evaluate(() => window.TestKit.controller.discard());
+    await context.close();
+  }
+  r.requests = requests;
+  assert.equal(r.casualRequests, 0);
+  assert.ok(r.cachedExportPlays, 'export from the prefetched player opens');
+  assert.equal(requests.filter((x) => x === 'cached-run').length, 1, 'prefetched once; the export used the cache');
+  assert.match(r.blockedError, /Could not load the replay player/);
+  assert.equal(r.blockedPhase, 'stopped');
+  assert.equal(r.blockedRetryLabel, 'Try download again');
+  assert.equal(requests.filter((x) => x === 'blocked-run').length, 2, 'prefetch failed silently and the export retried');
+  return r;
+};
+
+// M: audio tail at full navigations. A segment ends with its last stored
+// chunk; the time from there to the page's beforeunload is audio lost at the
+// navigation (up to one 1 s timeslice). Six navigations (link clicks and
+// page.goto, at varied offsets into the timeslice), then the tails are
+// measured from IndexedDB rows and the log.
+scenarios.M = async (browser) => {
+  const r = {};
+  const context = await browser.newContext({ acceptDownloads: true });
+  await context.grantPermissions(['microphone'], { origin: ORIGIN });
+  await context.addInitScript(INSTRUMENT);
+  const page = await context.newPage();
+  await startWithMic(page);
+  await beginRecording(page);
+  const waits = [2300, 2550, 2800, 3050, 2400, 2700];
+  for (let i = 0; i < waits.length; i++) {
+    await sleep(waits[i]);
+    if (i % 2 === 0) {
+      await page.locator('header a[href="about.html"]').click();
+      await page.waitForURL(/about\.html/);
+    } else {
+      await page.goto(`${DEMO}/index.html`);
+    }
+    await waitPhase(page, 'recording');
+    await waitAudio(page, 'live');
+  }
+  await sleep(2000);
+  const { file } = await stopAndDownload(page, 'M-nav-tail');
+  const payload = await readExport(file);
+  const unloads = payload.log.filter((e) => e.type === 'nav' && e.navType === 'beforeunload').map((e) => e.ts);
+  const segs = [...payload.audio].sort((a, b) => a.startTs - b.startTs);
+  r.tailsMs = unloads.map((t) => {
+    const seg = segs.filter((s) => s.startTs <= t).at(-1);
+    return seg ? t - seg.endTs : null;
+  });
+  const tails = r.tailsMs.filter((x) => x !== null);
+  r.meanTailMs = Math.round(tails.reduce((a, b) => a + b, 0) / Math.max(1, tails.length));
+  r.maxTailMs = Math.max(...tails);
+  r.segments = segs.length;
+  r.verdict = reportOf(payload).label;
+  assert.equal(unloads.length, waits.length);
+  // Measured 2026-10-08 (Chrome 155, localhost): mean ~493 ms without the
+  // requestData() at navigation intent, ~215 ms with it; max unchanged
+  // (~850 ms) when the chunk's IndexedDB write loses the race with unload.
+  assert.ok(r.meanTailMs < 350, `mean audio tail at navigation ${r.meanTailMs} ms`);
+  await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+  return r;
+};
+
+// N: a host focus trap shaped like MUI's FocusTrap (document `focusin`
+// bubble listener that refocuses its root when document.activeElement is
+// outside it, a 50 ms BODY check, a capture keydown) plus a capture-phase
+// focusin trap (focus-trap style). With one open, the tester can still click
+// into the overlay and Tab through it; the traps still work for host focus.
+scenarios.N = async (browser) => {
+  const r = {};
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(`${DEMO}/index.html?test=1`);
+  await page.locator('#testkit-root').waitFor({ state: 'attached' });
+  await page.evaluate(() => {
+    const dialog = document.createElement('div');
+    dialog.id = 'host-dialog';
+    dialog.tabIndex = -1;
+    dialog.innerHTML = '<button id="in-a">A</button><button id="in-b">B</button>';
+    document.body.append(dialog, Object.assign(document.createElement('button'), { id: 'outside', textContent: 'Outside' }));
+    window.__pulls = { bubble: 0, capture: 0 };
+    const contain = (kind) => () => {
+      if (!dialog.contains(document.activeElement)) {
+        window.__pulls[kind]++;
+        dialog.focus();
+      }
+    };
+    document.addEventListener('focusin', contain('bubble'));
+    document.addEventListener('focusin', contain('capture'), true);
+    document.addEventListener('keydown', () => {}, true);
+    setInterval(() => document.activeElement?.tagName === 'BODY' && contain('bubble')(), 50);
+    document.getElementById('in-a').focus();
+  });
+  const inOverlay = () => page.evaluate(() => {
+    const root = document.querySelector('#testkit-root');
+    return document.activeElement === root && root.shadowRoot.activeElement?.dataset.fid || null;
+  });
+  await page.locator('.tk-bubble').click();
+  await page.locator('.tk-panel:not([hidden])').waitFor();
+  r.afterOpen = await inOverlay();
+  const tabbed = [];
+  // Idle panel: [collapse] [Start test session], focus starts on Start.
+  // Tabbing past the overlay's ends would leave it, trap or not.
+  for (const key of ['Shift+Tab', 'Tab', 'Shift+Tab']) {
+    await page.keyboard.press(key);
+    await sleep(120); // let the trap's interval run
+    tabbed.push((await inOverlay()) || (await page.evaluate(() => `outside:${document.activeElement?.id || document.activeElement?.tagName}`)));
+  }
+  r.tabbed = tabbed;
+  r.overlayPulls = await page.evaluate(() => ({ ...window.__pulls }));
+  // The host's own focus events still reach its traps.
+  await page.evaluate(() => document.getElementById('outside').focus());
+  r.hostTrapStillWorks = await page.evaluate(() => document.activeElement?.id === 'host-dialog');
+  assert.ok(r.afterOpen, 'focus is in the overlay after opening it');
+  assert.ok(tabbed.every((f) => !f.startsWith('outside:')), `Tab stays in the overlay: ${JSON.stringify(tabbed)}`);
+  assert.deepEqual(r.overlayPulls, { bubble: 0, capture: 0 }, 'no trap pulled focus out of the overlay');
+  assert.ok(r.hostTrapStillWorks, 'host focus events are untouched');
   await context.close();
   return r;
 };

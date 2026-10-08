@@ -11,9 +11,23 @@ in the same edit and say so in your report.
   imports the host's React (plain `.js`, no JSX).
 - **No network egress.** No `fetch`/XHR/beacon/WebSocket to anything, ever. The
   only network activity TestKit causes is loading its own code from its own
-  origin: the loader injecting `testkit-core.js`, and, at export time, the
-  core injecting `testkit-player-source.js` from the same folder (script build)
-  or the host's bundler loading the player chunk (package build).
+  origin: the loader injecting `testkit-core.js`, and the core loading the
+  replay player: `testkit-player-source.js` from the same folder (script build)
+  or the player chunk via the host's bundler (package build). The player is
+  **prefetched** once an active session records (successful `start()`, a
+  restored recording/paused session, `resume()`) and kept in memory for the
+  page (`prefetchPlayer()` in exporter.js), so a tester who goes offline later
+  can still download; a failed prefetch is silent and the export loads it again
+  (and reports `Export failed: …` if that fails too). Idle pages and casual
+  viewers never load it. **Package build:** Chrome caches a failed dynamic
+  `import()` for the life of the page (an in-page retry makes no request), so
+  the package's `loadPlayerJs()` rejects with `{ name: 'PlayerLoadError',
+  reloadToRetry: true }`; `exportSession()` then sets `state.exportNeedsReload`
+  and `state.error` to *The replay player couldn’t load. Reload and download
+  again — your session is saved.*, and the overlay's download button becomes
+  **Reload and retry**: it reloads the current URL with `test=1` set, and the
+  stopped session restores from `testkit:last`. The script build keeps the
+  in-page retry (a re-injected script is fetched again).
 - **One time base:** every timestamp is wall-clock `Date.now()` milliseconds —
   the same clock rrweb stamps events with.
 - Bundled by esbuild (`scripts/build.mjs`). Import packages by name (`rrweb`,
@@ -248,6 +262,7 @@ controller.getState() → {
   savedAudio: { kind: 'recorded'|'gaps'|'none', label, gaps, gapMs, segments, unreliable, dropped } | null,
                                 // stopped only: the pre-download verdict (audioReport)
   exportWithoutAudio,           // true after the audio could not be encoded into the file
+  exportNeedsReload,            // package build: the player chunk failed to load; only a reload can retry
   downloaded,                   // stopped only: SessionRecord.exportedAt is set (persisted, survives reloads)
   downloadedWithoutAudio,       // stopped only: exportedWithoutAudioAt is set (the audio exists only in IndexedDB)
   previousDownloadedAt,         // preflight only: exportedAt of the stopped session this setup replaces, else null
@@ -339,7 +354,11 @@ visible and takes over if the owner is gone.
 
 ## Audio (`src/core/audio.js`)
 
-MediaRecorder with `timeslice` ≈ 1000 ms (plus `requestData()` when the page is hidden), mime chosen via `isTypeSupported()`
+MediaRecorder with `timeslice` ≈ 1000 ms (plus `requestData()` when the page is hidden,
+on `beforeunload`, and on a link click or form submit, so a full navigation loses less of
+the last timeslice: harness scenario M measured the mean tail lost at a navigation
+dropping from ~493 ms to ~215 ms; the worst case is unchanged at ~850 ms, when the
+chunk's IndexedDB write loses the race with unload), mime chosen via `isTypeSupported()`
 (prefer `audio/webm;codecs=opus`, then `audio/mp4`, then `audio/ogg;codecs=opus`),
 `audioBitsPerSecond` = `config.audio.bitrate`. `getUserMedia({ audio: {
 echoCancellation: true, noiseSuppression: true } })`. Each MediaRecorder
@@ -448,6 +467,10 @@ recording time outside pauses not covered by any audio segment (≥0.5 s),
 computed from `audio` when given, else from `audio-gap` log entries. With none,
 the line reads `- Audio gaps: none of 0.5s or more`; a trail `audio-gap` entry
 shorter than that is suffixed `(under 0.5s, not counted as a gap)`.
+`- Pages visited:` (`pagesVisited()`) lists unique pages in visit order,
+starting with the session's first page (`meta.prototypeUrl`, else the first
+segment's URL); a `replaceState` that changes only the query/hash of the page
+just listed updates that entry instead of adding one.
 `audioReport({ session, log, events, audio, dropped }) → { kind, label, gaps, … }`
 is the single saved-audio verdict — **Audio recorded** / **Audio recorded with
 gaps** / **No audio recorded** — used by the summary (`- Audio saved:` line), the
@@ -474,6 +497,15 @@ data, seekToWall, getOffset }` for automated checks.
    `document.currentScript` while the core evaluates, so SPA navigation can't
    change it) on the first export, and caches it. The player is ~270 kB, so the
    core stays under Vite's 500 kB chunk warning.
+   **Unhashed within `/v1/`:** `testkit-player-source.js` (like
+   `testkit-core.js`) has a fixed name per major version, so a page whose
+   core loaded before a deploy can fetch the player from after it (and a
+   host's HTTP cache can pair them the other way round). Within a major
+   version, every core must therefore produce a payload every player can read,
+   and every player must read every payload an older core of that major
+   writes: additive, optional fields only. A change that breaks this is a new
+   major version (`/v2/`). (The package build has no such skew: its player
+   chunk name is content-hashed and imported by the core that references it.)
 3. `src/loader.js` → `public/v1/testkit.js`.
 4. `src/index.js` → `dist/index.js` and `src/react/index.js` → `dist/react.js`
    (one ESM build, code-split: both entries share the boot chunk, and its
@@ -496,11 +528,17 @@ id="testkit-root">` appended to `<html>` (not `<body>`, so prototype body
 re-renders can't remove it). Everything inside the shadow root is excluded from
 rrweb (`blockClass: 'testkit-block'`) and from the interaction log.
 
+The pause toggle is `data-fid="pause"` while it reads Pause and
+`data-fid="resume"` while it reads Resume; keyboard focus follows it across the
+switch.
+
 Task controls: **Skip task** (`data-fid="skip-task"`, a plain secondary button
 before the primary Next task/Finish, disabled while paused, hidden during a
 follow-up question and in free exploration) calls `skipTask()`. Next, Skip task and the follow-up buttons advance at most
 once per click: the second click of a double click (`event.detail > 1`) is
-ignored, a press while the previous call is in flight is ignored, and the call
+ignored, a press while the previous call is in flight is ignored (the guard
+lets go after 10 s if a call never settles, so the buttons can't stay dead
+until reload), and the call
 carries `taskIndex` so the controller drops a stale one. The stopped panel
 shows "N of M completed, K skipped" and **Start new session**
 (`data-fid="new-session"`; confirm buttons `confirm-download`,
@@ -509,7 +547,14 @@ shows "N of M completed, K skipped" and **Start new session**
 Overlay-owned storage: `localStorage['testkit:overlay-pos']` = `{ side: 'left'|'right', y }`
 (bubble position, survives navigation); `sessionStorage['testkit:overlay-open']` =
 `'1'|'0'` (panel expanded, per tab). Key events inside the overlay stop at the shadow
-root so prototype shortcuts never fire while typing in it.
+root so prototype shortcuts never fire while typing in it (in fact at window
+capture). `focusin`/`focusout` whose target is inside the overlay stop there too,
+so a host focus trap (MUI's FocusTrap: a document `focusin` listener that refocuses
+its dialog when `document.activeElement`, i.e. our shadow host, is outside it)
+doesn't pull focus out of the overlay; the host's own focus events are untouched.
+Limits: window capture listeners registered before TestKit loaded still see them;
+with a modal host dialog open, Tab from the host can't reach the overlay (click
+the bubble), and Tab past the overlay's first/last control leaves it.
 
 ## Requests from overlay
 

@@ -9,7 +9,7 @@ import { register } from 'node:module';
 register(
   `data:text/javascript,${encodeURIComponent(`
     export async function resolve(specifier, context, next) {
-      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,export const loadPlayerJs = async () => ""', shortCircuit: true };
+      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,globalThis.__playerLoads = (globalThis.__playerLoads || 0); export const loadPlayerJs = async () => { globalThis.__playerLoads++; return ""; }', shortCircuit: true };
       if (specifier === 'rrweb') return { url: 'data:text/javascript,export function record() {}', shortCircuit: true };
       return next(specifier, context);
     }`)}`,
@@ -189,6 +189,17 @@ async function startSession({ audio = false, store = memoryStore() } = {}) {
 function savedSession(store) {
   return [...store.sessions.values()][0];
 }
+
+// Must stay the first test that starts a session: the exporter caches the
+// player for the whole process, so later starts load nothing.
+test('only an active session prefetches the player: not on boot, not in setup, once on start', async () => {
+  const { deps } = fakeDeps();
+  const controller = await createController({ config, store: memoryStore(), deps });
+  await controller.beginPreflight();
+  assert.equal(globalThis.__playerLoads || 0, 0);
+  await controller.start({ consent: true, audio: false });
+  assert.equal(globalThis.__playerLoads, 1);
+});
 
 test('start → next ×3 counts every task and stops', async () => {
   const { store, seen, controller } = await startSession();
@@ -854,4 +865,48 @@ test('tasksSkipped survives a navigation that aborted the IndexedDB write', asyn
   assert.equal(s.phase, 'recording');
   assert.equal(s.taskIndex, 1);
   assert.equal(s.tasksSkipped, 1);
+});
+
+test('a player load that can only be retried by reloading (package build) says so', async () => {
+  const { store, controller } = await startSession();
+  await controller.stop();
+  store.loadSessionData = async () => {
+    const err = new Error('The replay player could not be loaded: Failed to fetch dynamically imported module');
+    err.name = 'PlayerLoadError';
+    err.reloadToRetry = true;
+    throw err;
+  };
+  await assert.rejects(controller.exportSession(), { message: session.PLAYER_RELOAD_ERROR });
+  const s = controller.getState();
+  assert.equal(s.exportNeedsReload, true);
+  assert.equal(s.phase, 'stopped');
+  assert.equal(s.error, 'The replay player couldn’t load. Reload and download again — your session is saved.');
+});
+
+test("Start never carries the preflight mic check's 'live' into the session", async () => {
+  const { deps, seen } = fakeDeps();
+  const store = memoryStore();
+  const controller = await createController({ config, store, deps });
+  await controller.beginPreflight();
+  await controller.requestMic();
+  assert.equal(controller.getState().audio.status, 'live', 'preflight level check');
+  let release;
+  const created = store.createSession;
+  store.createSession = async (rec) => {
+    await new Promise((r) => (release = r));
+    return created(rec);
+  };
+  const statuses = [];
+  controller.subscribe((s) => statuses.push(s.audio.status));
+  const starting = controller.start({ consent: true, audio: true });
+  await settle();
+  const whileCreating = controller.getState().audio.status;
+  release(); // before asserting, so a failure can't leave start() hanging
+  await starting;
+  assert.equal(whileCreating, 'pending', 'while the session is being created');
+  assert.equal(controller.getState().audio.status, 'pending');
+  assert.ok(!statuses.includes('live'), statuses.join(','));
+  seen.capture.emit();
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live', 'live once a chunk is saved');
 });

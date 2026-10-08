@@ -122,6 +122,42 @@ export function canSkipTask(state) {
   return Boolean(state?.tasks?.length && state.tasks[state.taskIndex]);
 }
 
+export const ADVANCE_TIMEOUT_MS = 10_000;
+
+/**
+ * One Next/Skip call at a time. A press while one is in flight is dropped;
+ * if a call never settles, the guard lets go after `timeoutMs` so the buttons
+ * don't stay dead until reload (the controller's taskIndex check still stops
+ * a double advance). `run(fn)` → false when dropped, else fn's result.
+ */
+export function createAdvanceGuard({ timeoutMs = ADVANCE_TIMEOUT_MS } = {}) {
+  let busy = null; // token of the call holding the guard
+  return {
+    get busy() {
+      return busy !== null;
+    },
+    run(fn) {
+      if (busy) return false;
+      const token = {};
+      busy = token;
+      const release = () => {
+        if (busy === token) busy = null;
+        clearTimeout(timer);
+      };
+      const timer = setTimeout(release, timeoutMs);
+      let result;
+      try {
+        result = fn();
+      } catch (err) {
+        release();
+        throw err;
+      }
+      Promise.resolve(result).then(release, release);
+      return result;
+    },
+  };
+}
+
 // Tasks the tester skipped (controller count; older controllers report none).
 export function tasksSkipped(state) {
   const total = state.tasks?.length || 0;

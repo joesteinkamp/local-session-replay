@@ -9,6 +9,7 @@ import {
   MIC_PASS_LEVEL,
   canSkipTask,
   canStart,
+  createAdvanceGuard,
   clamp,
   consentText,
   createMicCheck,
@@ -160,7 +161,6 @@ function mount(controller) {
     timeUp: false,
     finishedLast: false, // tester pressed Finish on the last task (this page load)
     skipped: false, // the task change in flight came from Skip task
-    advancing: false, // a Next/Skip call is in flight
     focusNext: null, // data-fid to focus after the next render
     forceFocus: false, // focus even if focus wasn't inside the overlay
   };
@@ -298,6 +298,7 @@ function mount(controller) {
       announce('Before you start: review consent and check your microphone.');
     } else if (to === 'recording') {
       if (from === 'paused') {
+        if (shadow.activeElement?.dataset?.fid === 'resume') ui.focusNext = 'pause';
         announce('Recording resumed.');
       } else {
         ui.timeUp = false;
@@ -306,6 +307,8 @@ function mount(controller) {
         announce(`Recording started. ${taskAnnouncement()}`);
       }
     } else if (to === 'paused') {
+      // The toggle's data-fid follows its label; keep focus on it.
+      if (shadow.activeElement?.dataset?.fid === 'pause') ui.focusNext = 'resume';
       announce('Recording paused.');
     } else if (to === 'stopped' && from === 'preflight') {
       // Setup cancelled: back to the session it was started from.
@@ -444,14 +447,10 @@ function mount(controller) {
   // One task change per click: a double click (or a second press before the
   // controller answers) must not advance twice. The controller also ignores a
   // call whose taskIndex is no longer current.
+  const advanceGuard = createAdvanceGuard();
   function advanceOnce(fn) {
-    if (ui.advancing) return;
-    ui.advancing = true;
     const taskIndex = state.taskIndex;
-    const done = () => {
-      ui.advancing = false;
-    };
-    Promise.resolve(act(() => fn(taskIndex))).then(done, done);
+    advanceGuard.run(() => act(() => fn(taskIndex)));
   }
 
   // Secondary to Next: the task ends as skipped, not completed; no follow-up.
@@ -496,7 +495,22 @@ function mount(controller) {
     render();
   }
 
+  // Package build: Chrome keeps a failed player chunk import for the life of
+  // the page, so retrying means a reload. ?test=1 brings the overlay back and
+  // the stopped session restores from testkit:last.
+  function reloadForExport() {
+    writeStorage('sessionStorage', OPEN_KEY, '1');
+    announce('Reloading the page. Your session is saved.');
+    const url = new URL(location.href);
+    url.searchParams.set('test', '1');
+    location.assign(url.href);
+  }
+
   function doExport(options) {
+    if (state.exportNeedsReload) {
+      reloadForExport();
+      return;
+    }
     if (ui.exporting) return;
     ui.exporting = true;
     ui.exportError = null;
@@ -567,7 +581,7 @@ function mount(controller) {
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
       state.audio?.stopAsking, state.audio?.deviceChanged, state.savedAudio, state.exportWithoutAudio,
-      state.downloaded, state.downloadedWithoutAudio, state.previousDownloadedAt, state.tasksCompleted, state.tasksSkipped,
+      state.downloaded, state.downloadedWithoutAudio, state.exportNeedsReload, state.previousDownloadedAt, state.tasksCompleted, state.tasksSkipped,
       ui.micHelp, ui.retrying,
       state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
@@ -982,7 +996,7 @@ function mount(controller) {
       actions.push(h(
         'div',
         { class: 'tk-row' },
-        btn(paused ? 'Resume' : 'Pause', { fid: 'pause', onclick: togglePause }),
+        btn(paused ? 'Resume' : 'Pause', { fid: paused ? 'resume' : 'pause', onclick: togglePause }),
         canMute
           ? btn(state.muted ? 'Unmute' : 'Mute', { fid: 'mute', disabled: paused, onclick: () => act(() => controller.toggleMute()) })
           : null,
@@ -1072,7 +1086,7 @@ function mount(controller) {
     if (saved) out.push(h('p', { class: `tk-notice${state.savedAudio.kind === 'recorded' ? ' is-ok' : state.savedAudio.kind === 'gaps' ? ' is-warn' : ''}`, 'data-saved-audio': state.savedAudio.kind }, saved));
     // The controller's message already starts with "Export failed:" (or is the
     // exact audio-too-large copy); don't prefix it twice.
-    if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
+    if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio || state.exportNeedsReload ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
     if (!res && !exporting && !ui.exportError) {
       let text = 'The recording is saved in this browser until you download or discard it.';
       if (state.downloaded) text = 'You downloaded this session earlier. It stays in this browser until you discard it or start a new session.';
@@ -1083,7 +1097,8 @@ function mount(controller) {
     out.push(h('div', { class: 'tk-row' }, btn(
       exporting
         ? [h('span', { class: 'tk-spinner', 'aria-hidden': 'true' }), 'Preparing file…']
-        : res ? 'Download again' : (ui.exportError ? 'Try download again' : 'Download session file'),
+        : state.exportNeedsReload ? 'Reload and retry'
+          : res ? 'Download again' : (ui.exportError ? 'Try download again' : 'Download session file'),
       {
         variant: 'is-primary is-grow',
         fid: 'download',
@@ -1092,7 +1107,7 @@ function mount(controller) {
         onclick: () => doExport(),
       },
     )));
-    if (state.exportWithoutAudio && !exporting) {
+    if (state.exportWithoutAudio && !state.exportNeedsReload && !exporting) {
       out.push(h('div', { class: 'tk-row' }, btn('Download without audio', { fid: 'download-visual', onclick: () => doExport({ withoutAudio: true }) })));
     }
 
@@ -1312,6 +1327,20 @@ function mount(controller) {
   const onKeyGuarded = guard(onKey);
   const KEY_EVENTS = ['keydown', 'keyup', 'keypress'];
 
+  // Host focus traps (MUI's FocusTrap listens for document `focusin` and
+  // pulls focus back into its dialog or menu whenever document.activeElement,
+  // which is our shadow host, is outside it). Focus moving within the overlay
+  // is none of the host's business, so focusin/focusout whose target is inside
+  // the overlay stop at window capture, like keys. Focus itself is unaffected
+  // (these events aren't cancelable), and events of the host's own elements
+  // are untouched. Same limitation: window capture listeners registered before
+  // TestKit loaded still see them.
+  function onFocusEvent(e) {
+    if (e.composedPath().includes(host)) e.stopImmediatePropagation();
+  }
+  const onFocusGuarded = guard(onFocusEvent);
+  const FOCUS_EVENTS = ['focusin', 'focusout'];
+
   const onResize = guard(() => applyPosition());
 
   bubble.addEventListener('pointerdown', guard(onPointerDown));
@@ -1320,6 +1349,7 @@ function mount(controller) {
   bubble.addEventListener('pointercancel', guard((e) => endDrag(e, true)));
   bubble.addEventListener('click', guard(onBubbleClick));
   for (const type of KEY_EVENTS) window.addEventListener(type, onKeyGuarded, true);
+  for (const type of FOCUS_EVENTS) window.addEventListener(type, onFocusGuarded, true);
   window.addEventListener('resize', onResize);
 
   let unsubscribe = null;
@@ -1343,6 +1373,7 @@ function mount(controller) {
       clearTimeout(announceTimer);
       window.removeEventListener('resize', onResize);
       for (const type of KEY_EVENTS) window.removeEventListener(type, onKeyGuarded, true);
+      for (const type of FOCUS_EVENTS) window.removeEventListener(type, onFocusGuarded, true);
       try {
         if (typeof unsubscribe === 'function') unsubscribe();
       } catch {

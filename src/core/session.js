@@ -12,7 +12,7 @@ import { createInteractionLog } from './interaction-log.js';
 import { classifyMicError, createAudioCapture, micPermissionState, pickMimeType } from './audio.js';
 import { clip } from './selector.js';
 import { elapsedMsFor } from './store.js';
-import { exportSession as buildExport } from '../export/exporter.js';
+import { exportSession as buildExport, prefetchPlayer } from '../export/exporter.js';
 import { AUDIO_EXPORT_FAILED } from '../export/payload.js';
 import { audioReport } from '../export/summary.js';
 
@@ -34,6 +34,8 @@ export const AUDIO_SAVE_ERROR = 'Audio could not be saved';
 export const STORAGE_FULL_ERROR = 'Browser storage is full. Stop and download the session now; new activity may not be saved.';
 export const MIC_DISCONNECTED = 'Microphone disconnected';
 export const MIC_TURNED_OFF = 'Microphone turned off by the tester';
+// Package build only: a failed player chunk import can't be retried in-page.
+export const PLAYER_RELOAD_ERROR = 'The replay player couldn’t load. Reload and download again — your session is saved.';
 export { AUDIO_EXPORT_FAILED };
 
 const isQuotaError = (err) => err?.name === 'QuotaExceededError' || /quota/i.test(err?.message || '');
@@ -115,6 +117,7 @@ export async function createController({ config, store, deps = {} }) {
       audio: { enabled: config.audio.enabled, stopAsking: false, status: 'off', error: null },
       savedAudio: null,
       exportWithoutAudio: false,
+      exportNeedsReload: false,
       downloaded: false,
       downloadedWithoutAudio: false,
       previousDownloadedAt: null,   // preflight only: when the session this setup replaces was downloaded
@@ -322,7 +325,10 @@ export async function createController({ config, store, deps = {} }) {
         if (!ended) store.appendLog(id, entry);
         if (entry.type === 'session-end') ended = true;
       },
-      onNavigationIntent: () => queueMicrotask(() => store.flush?.()),
+      onNavigationIntent: () => {
+        flushAudioTail();
+        queueMicrotask(() => store.flush?.());
+      },
     });
     owner = true;
     openChannel();
@@ -632,6 +638,7 @@ export async function createController({ config, store, deps = {} }) {
       audio: { enabled: audioFields(session.audio).enabled, stopAsking: audioFields(session.audio).stopAsking, status: 'off', error: null },
       savedAudio: null,
       exportWithoutAudio: false,
+      exportNeedsReload: false,
       downloaded: !!session.exportedAt,
       downloadedWithoutAudio: !!session.exportedWithoutAudioAt,
       otherTab: false,
@@ -662,6 +669,7 @@ export async function createController({ config, store, deps = {} }) {
     attachCapture();
     store.setActiveSessionId?.(session.study, session.id, session.lastActivityAt);
     state = stateFromSession(rec.phase);
+    prefetchPlayer(); // this page will be the one that exports
     if (rec.phase === 'recording') {
       startCapture({ pageLoad: true });
       log('session-resume', {});
@@ -776,6 +784,14 @@ export async function createController({ config, store, deps = {} }) {
     { capture: true },
   );
 
+  // A full navigation would otherwise lose the audio buffered since the last
+  // timeslice (up to 1 s): ask for it as soon as the page knows it's leaving,
+  // so its IndexedDB write has the whole unload to land.
+  function flushAudioTail() {
+    if (owner && state.phase === 'recording') audio?.requestData();
+  }
+  window.addEventListener('beforeunload', flushAudioTail, { capture: true });
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
       // Hidden usually precedes pagehide: get buffered audio out while the page can still write it.
@@ -887,6 +903,9 @@ export async function createController({ config, store, deps = {} }) {
         }
         const consentAt = Date.now();
         const useAudio = config.audio.enabled && wantAudio !== false;
+        // The preflight level check showed 'live'; in a session that means a
+        // chunk was saved, which hasn't happened yet.
+        if (useAudio && state.audio.status === 'live') setAudio({ status: 'pending' });
         const startMic = useAudio && !audio?.isLive() ? await acquireMic(() => state.phase === 'preflight') : null;
         if (!useAudio) {
           await releaseAudio();
@@ -945,6 +964,7 @@ export async function createController({ config, store, deps = {} }) {
         if (tasks.length) await beginTask(0);
         startTicker();
         emit();
+        prefetchPlayer(); // so Download works even if the tester goes offline later
       });
     },
 
@@ -993,6 +1013,7 @@ export async function createController({ config, store, deps = {} }) {
         mark('testkit:resume', {});
         log('resume', {});
         startTicker();
+        prefetchPlayer();
         if (micWanted()) {
           const gen = generation;
           const isCurrent = () => gen === generation && state.phase === 'recording';
@@ -1103,8 +1124,10 @@ export async function createController({ config, store, deps = {} }) {
         } catch (err) {
           console.warn('[TestKit] export failed', err);
           const audioTooLarge = err?.name === 'AudioExportError' || (!withoutAudio && err?.message === AUDIO_EXPORT_FAILED);
-          const error = audioTooLarge ? AUDIO_EXPORT_FAILED : `Export failed: ${messageOf(err)}`;
-          set({ phase: 'stopped', error, exportWithoutAudio: audioTooLarge || state.exportWithoutAudio });
+          // Package build: the failed chunk import stays cached in this page.
+          const needsReload = !!err?.reloadToRetry;
+          const error = needsReload ? PLAYER_RELOAD_ERROR : audioTooLarge ? AUDIO_EXPORT_FAILED : `Export failed: ${messageOf(err)}`;
+          set({ phase: 'stopped', error, exportWithoutAudio: audioTooLarge || state.exportWithoutAudio, exportNeedsReload: needsReload || state.exportNeedsReload });
           return { error };
         }
       }).then((res) => {
