@@ -49,6 +49,31 @@ test('both entries share one boot chunk that lazily imports a separate core chun
   assert.equal(lazy.length, 1, 'a shared chunk dynamically imports core');
 });
 
+// Vite warns on chunks over 500 kB; the replay player (~270 kB of source text
+// inlined into exports) is loaded only at export time.
+const KB500 = 500 * 1024;
+
+test('the core chunk stays under 500 kB; the player text is a separate chunk it imports lazily', () => {
+  const chunks = readdirSync(path.join(dist, 'chunks'));
+  const [core] = chunks.filter((f) => f.startsWith('core-'));
+  const players = chunks.filter((f) => f.startsWith('testkit-player-'));
+  assert.equal(players.length, 1, 'one player chunk');
+  const code = read(`chunks/${core}`);
+  assert.ok(code.length < KB500, `core chunk is ${code.length} bytes`);
+  assert.ok(code.includes(`import("./${players[0]}")`), 'core imports the player chunk dynamically');
+  assert.ok(!staticImports(code).some((s) => s.includes(players[0])), 'never statically');
+  assert.doesNotMatch(code, /TestKitPlayer/, 'player source is not inlined in core');
+});
+
+test('script build: testkit-core.js under 500 kB; testkit-player-source.js defines the player source', () => {
+  const core = read('script/testkit-core.js');
+  assert.ok(core.length < KB500, `testkit-core.js is ${core.length} bytes`);
+  assert.match(core, /testkit-player-source\.js/);
+  const window = {};
+  new Function('window', read('script/testkit-player-source.js'))(window);
+  assert.equal(window.__TestKitPlayerSource, read('script/testkit-player.js'));
+});
+
 test('types ship for both entries', () => {
   assert.ok(existsSync(path.join(dist, 'index.d.ts')));
   assert.match(read('react.d.ts'), /export function TestKit\(props: TestKitConfig\): null;/);

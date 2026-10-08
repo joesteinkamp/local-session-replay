@@ -9,7 +9,7 @@ import { register } from 'node:module';
 register(
   `data:text/javascript,${encodeURIComponent(`
     export async function resolve(specifier, context, next) {
-      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,export default ""', shortCircuit: true };
+      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,export const loadPlayerJs = async () => ""', shortCircuit: true };
       if (specifier === 'rrweb') return { url: 'data:text/javascript,export function record() {}', shortCircuit: true };
       return next(specifier, context);
     }`)}`,

@@ -130,11 +130,12 @@ goes to a new path. Pages replaces the whole site on each deploy, so before
 the same artifact.
 
 **Self-hosted script files:** copy `testkit.js`, `testkit-core.js` and
-`testkit-player.js` into one folder of the host app's static files (they're in
-`public/v1/` after `npm run build`, or
+`testkit-player-source.js` into one folder of the host app's static files
+(they're in `public/v1/` after `npm run build`, or
 `node_modules/local-session-replay/dist/script/` after an npm install) and
 load `testkit.js` as above. The loader fetches `testkit-core.js` from its
-own folder. If the host injects `testkit.js` without a `<script src>`, pass
+own folder, and the first export fetches `testkit-player-source.js` (the replay
+player inlined into every file) from the same folder. If the host injects `testkit.js` without a `<script src>`, pass
 `baseUrl` to say where that folder is, as an absolute URL or a root-relative
 path (`/testkit/v1/`). A plain relative path resolves against each page.
 

@@ -10,8 +10,10 @@ in the same edit and say so in your report.
   Chrome, Firefox, Safari (desktop). The one exception is `src/react/`, which
   imports the host's React (plain `.js`, no JSX).
 - **No network egress.** No `fetch`/XHR/beacon/WebSocket to anything, ever. The
-  only network activity TestKit causes is the loader injecting
-  `testkit-core.js` from its own base URL.
+  only network activity TestKit causes is loading its own code from its own
+  origin: the loader injecting `testkit-core.js`, and, at export time, the
+  core injecting `testkit-player-source.js` from the same folder (script build)
+  or the host's bundler loading the player chunk (package build).
 - **One time base:** every timestamp is wall-clock `Date.now()` milliseconds —
   the same clock rrweb stamps events with.
 - Bundled by esbuild (`scripts/build.mjs`). Import packages by name (`rrweb`,
@@ -419,8 +421,8 @@ failed-but-not-denied mic automatically.
 from parts and never exists as one string, so long sessions avoid engine
 string limits (peak ≈ 1.6× payload, measured at 150 MB). There is no `html`
 string; callers pass the Blob to the download (`URL.createObjectURL(blob)` +
-`<a download>`). Contents: inlined player bundle (`PLAYER_JS`, imported as
-text — see build), and a `<script type="application/json" id="testkit-data">`
+`<a download>`). Contents: inlined player bundle (its source text from
+`loadPlayerJs()` of `virtual:player-bundle`, loaded only at export — see Build), and a `<script type="application/json" id="testkit-data">`
 payload (every `<` escaped as `\u003c`, plus U+2028/2029) holding `{ version: 1,
 testkitVersion, exportedAt, session, events, log, audio: [{ audioSegmentId,
 startTs, endTs, mime, seqGaps?, dataUrl }], audioDropped, audioOmitted, omittedAudio, summaryMarkdown }`
@@ -461,14 +463,23 @@ data, seekToWall, getOffset }` for automated checks.
 `scripts/build.mjs` builds, in order:
 1. `src/player/player.js` → `public/v1/testkit-player.js` (IIFE, minified, CSS
    injected by the bundle itself — import CSS files as text and append a `<style>`).
-2. `src/core/index.js` → `public/v1/testkit-core.js`; the import specifier
-   `virtual:player-bundle` resolves to the text of step 1's output
-   (`import PLAYER_JS from 'virtual:player-bundle'`).
+2. `public/v1/testkit-player-source.js` = `window.__TestKitPlayerSource="<step 1's
+   output as a string>";`, then `src/core/index.js` → `public/v1/testkit-core.js`.
+   The exporter imports `{ loadPlayerJs } from 'virtual:player-bundle'`
+   (`() → Promise<string>`, the player's source). Here it resolves to
+   `src/export/player-script.js`, which injects `testkit-player-source.js` from
+   the folder `testkit-core.js` was loaded from (captured from
+   `document.currentScript` while the core evaluates, so SPA navigation can't
+   change it) on the first export, and caches it. The player is ~270 kB, so the
+   core stays under Vite's 500 kB chunk warning.
 3. `src/loader.js` → `public/v1/testkit.js`.
 4. `src/index.js` → `dist/index.js` and `src/react/index.js` → `dist/react.js`
    (one ESM build, code-split: both entries share the boot chunk, and its
    dynamic import of `src/core/index.js` becomes `dist/chunks/core-*.js`, which
-   exports `start(config)`; `react`/`react-dom` are external).
+   exports `start(config)`; `react`/`react-dom` are external). Here
+   `virtual:player-bundle`'s `loadPlayerJs()` is a dynamic `import()` of the
+   player text, split into `dist/chunks/testkit-player-*.js` (resolved relative
+   to the core chunk by the host bundler, never the page URL).
    `src/index.d.ts`, `src/react.d.ts`, and the three `public/v1/` files are
    copied to `dist/`. `test/package-build.test.js` checks the output;
    `npm run check:package` checks the packed tarball in scratch consumers.
