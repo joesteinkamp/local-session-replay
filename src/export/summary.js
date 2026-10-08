@@ -8,8 +8,9 @@ export const IDLE_THRESHOLD_MS = 20000;
 // Recorder start latency leaves sub-second slivers at segment edges; ignore them.
 export const AUDIO_GAP_MIN_MS = 500;
 
-const TRAIL_TYPES = new Set(['click', 'input', 'change', 'submit', 'nav', 'error', 'rejection', 'pause', 'resume', 'mute', 'unmute', 'audio-gap']);
-const ERROR_TYPES = new Set(['error', 'rejection']);
+// Page errors stay in the raw log but are left out of the summary: this is a
+// usability test of the design, not a test of the prototype's code.
+const TRAIL_TYPES = new Set(['click', 'input', 'change', 'submit', 'nav', 'pause', 'resume', 'mute', 'unmute', 'audio-gap']);
 // rrweb IncrementalSource values that mean "the tester was doing something".
 const ACTIVITY_SOURCES = new Set([1, 2, 3, 5, 6]); // MouseMove, MouseInteraction, Scroll, Input, TouchMove
 const RRWEB_INCREMENTAL = 3;
@@ -397,9 +398,6 @@ export function formatTrailLine(item, originTs, baseUrl) {
       return `${t} submit ${item.selector || '(form)'}`;
     case 'nav':
       return `${t} nav ${item.navType || ''} ${shortUrl(item.to || item.url, baseUrl)}`.replace(/\s+/g, ' ');
-    case 'error':
-    case 'rejection':
-      return `${t} ${item.type} ${quote(item.message || 'unknown error', 120)}`;
     case 'audio-gap': {
       const gap = gapMsOf(item);
       // The "Audio gaps" line counts only gaps of AUDIO_GAP_MIN_MS or more;
@@ -438,8 +436,7 @@ function inSpan(ts, span) {
 function sessionSignals({ session, log, events, spans }) {
   const { start, end } = sessionBounds({ session, log, events });
   const pauses = pausedSpans(log, end ?? Infinity);
-  const outside = log.filter((e) => !spans.some((s) => inSpan(e.ts, s)));
-  return { start, end, pauses, outside };
+  return { start, end, pauses };
 }
 
 // `audio` is the segment list ({ startTs, endTs }); when given, audio gaps are
@@ -448,7 +445,7 @@ export function buildSummary({ session = {}, log = [], events = [], audio, audio
   const meta = session.meta || {};
   const baseUrl = meta.prototypeUrl || session.segments?.[0]?.url || null;
   const spans = buildTaskSpans({ session, log, events });
-  const { start, end, pauses, outside } = sessionSignals({ session, log, events, spans });
+  const { start, end, pauses } = sessionSignals({ session, log, events, spans });
   const pausedTotal = start !== null && end !== null ? overlapMs(start, end, pauses) : 0;
   const tasks = session.tasks || session.config?.tasks || [];
   const viewport = meta.viewport ? `${meta.viewport.w}×${meta.viewport.h}` : 'unknown';
@@ -505,15 +502,6 @@ export function buildSummary({ session = {}, log = [], events = [], audio, audio
       lines.push('(no interactions recorded)');
     }
 
-    const errors = entries.filter((e) => ERROR_TYPES.has(e.type));
-    if (errors.length) {
-      lines.push('', '### Errors', '');
-      for (const e of errors) {
-        const frame = String(e.stack || '').split('\n').map((l) => l.trim()).find((l) => l && l !== e.message);
-        lines.push(`- ${clock(e.ts - span.start)} ${e.type}: ${e.message || 'unknown error'}${frame ? ` (${frame})` : ''} on ${shortUrl(e.url, baseUrl) || 'unknown page'}`);
-      }
-    }
-
     const signals = [];
     for (const r of detectRageClicks(entries)) {
       signals.push(`- Rage click: ${r.count}× on ${r.selector}${r.text ? ` ${quote(r.text)}` : ''} at ${clock(r.start - span.start)}`);
@@ -533,7 +521,6 @@ export function buildSummary({ session = {}, log = [], events = [], audio, audio
       const len = g.durationMs === null ? 'unknown length' : `${((Math.min(g.end, span.end) - from) / 1000).toFixed(1)}s`;
       signals.push(`- Audio gap: ${len} from ${clock(from - span.start)}${g.reason ? ` (${g.reason})` : ''}`);
     }
-    if (errors.length) signals.push(`- Errors: ${errors.length}`);
     lines.push('', '### Signals', '', ...(signals.length ? signals : ['- none']), '');
   });
 
@@ -544,9 +531,6 @@ export function buildSummary({ session = {}, log = [], events = [], audio, audio
   }
 
   lines.push('## Session-level', '');
-  const outsideErrors = outside.filter((e) => ERROR_TYPES.has(e.type));
-  lines.push(`- Errors outside tasks: ${outsideErrors.length || 'none'}`);
-  for (const e of outsideErrors) lines.push(`  - ${formatTimestamp(e.ts)} ${e.type}: ${e.message || 'unknown error'} on ${shortUrl(e.url, baseUrl) || 'unknown page'}`);
   const hasSegments = Array.isArray(audio) && audio.length > 0;
   if (report) {
     lines.push(`- Audio saved: ${report.label}${report.kind === 'gaps' ? ` (${GAPS_MEANING})` : ''}`);

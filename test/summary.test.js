@@ -169,7 +169,6 @@ test('formatTrailLine formats each kind compactly', () => {
   assert.equal(formatTrailLine({ ts: at(3), type: 'click', selector: 'div.card', text: '' }, at(0)), '00:03 click div.card');
   assert.equal(formatTrailLine({ ts: at(3), type: 'input', selector: '#e', value: '***', edits: 5 }, at(0)), '00:03 input #e = "***" (5 edits)');
   assert.equal(formatTrailLine({ ts: at(3), type: 'nav', navType: 'pushState', to: 'https://x.test/a?b=1' }, at(0), 'https://x.test/'), '00:03 nav pushState /a?b=1');
-  assert.equal(formatTrailLine({ ts: at(3), type: 'error', message: 'Boom' }, at(0)), '00:03 error "Boom"');
   assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 1500 }, at(0)), '00:03 audio-gap 1.5s');
   assert.equal(formatTrailLine({ ts: at(3), type: 'pause' }, at(0)), '00:03 pause');
   assert.equal(formatTrailLine({ ts: at(3), type: 'click', selector: '#q', text: 'Say "hi"\n  now' }, at(0)), '00:03 click #q "Say \\"hi\\" now"');
@@ -261,7 +260,10 @@ test('buildSummary: per-task details, trail, and signals', () => {
   assert.ok(task1.includes('  - Answer: "The filter was empty"'));
   assert.ok(task1.includes('00:01 click input#q'));
   assert.ok(task1.includes('00:02 input input#q = "***" (2 edits)'));
-  assert.ok(task1.includes('- 00:05 error: TypeError: x is undefined (at f (app.js:1:2)) on /proto/'));
+  // Page errors are a code concern, not a usability one: never in the summary.
+  assert.ok(!task1.includes('TypeError'), task1);
+  assert.ok(!task1.includes('### Errors'));
+  assert.ok(!task1.includes('- Errors:'));
   assert.ok(task1.includes('- Rage click: 3× on button#apply "Apply" at 00:04'));
   assert.ok(task1.includes('- Long idle: 00:34 without logged interaction from 00:05'));
   assert.ok(task1.includes('- Time limit exceeded: 00:39 vs 00:30'));
@@ -276,8 +278,8 @@ test('buildSummary: per-task details, trail, and signals', () => {
 test('buildSummary: unreached tasks and session-level section', () => {
   const md = buildSummary(fixture());
   assert.ok(md.includes('## Tasks not reached\n\n- never: Checkout'));
-  assert.ok(md.includes('- Errors outside tasks: 1'));
-  assert.ok(md.includes('rejection: Unhandled: nope'));
+  assert.ok(!md.includes('Errors outside tasks'));
+  assert.ok(!md.includes('Unhandled: nope'));
   assert.ok(md.includes('- Audio gaps: 1 (1.2s total; mm:ss from session start)'));
   assert.ok(md.includes('- Pauses: 1 (00:18 total)'));
 });

@@ -1,5 +1,12 @@
 # Change Log
 
+## Hide page errors from the summary and replay (2026-10-08, Claude)
+
+- **What:** the agent summary and the replay player no longer show the prototype's JS errors or promise rejections: no trail lines, Errors sections or counts, timeline ticks, legend item or task badges. The errors are still logged and kept in the raw JSON.
+- **Ask:** an export listed React "Maximum update depth" errors under two tasks. TestKit runs usability tests, so code errors distract from what the tester did.
+- **Why this approach:** hide them, don't stop capturing them. The raw data stays complete for developers, while every view a researcher sees is about behavior.
+- **Rejected:** a setting to show or hide errors. Nobody asked for it, and it would add configuration for a view this tool shouldn't have.
+
 ## Installable package for other web apps, hosted on GitHub (2026-10-07, Claude)
 
 - **What:** renamed to `local-session-replay`. Added an ES module entry point (`init()`) that loads the recorder only when needed, plus types. It installs from GitHub and builds on install. Added a `baseUrl` option for the script tag, replaced GitLab CI with GitHub Actions + Pages, and licensed it MIT.

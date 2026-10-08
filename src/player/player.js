@@ -228,7 +228,7 @@ function createAudioSync(segments, { onStatus }) {
 
 // ---------- timeline ----------
 
-function createTimeline({ t0, t1, spans, pauses, gaps, errors, onSeek, onToggle }) {
+function createTimeline({ t0, t1, spans, pauses, gaps, onSeek, onToggle }) {
   const total = Math.max(1, t1 - t0);
   const pct = (ts) => `${(Math.min(Math.max(ts, t0), t1) - t0) / total * 100}%`;
   const width = (a, b) => `${(Math.min(b, t1) - Math.max(a, t0)) / total * 100}%`;
@@ -243,8 +243,7 @@ function createTimeline({ t0, t1, spans, pauses, gaps, errors, onSeek, onToggle 
   const playhead = h('div', { class: 'tk-playhead' });
   const lane = h('div', { class: 'tk-lane' },
     pauses.map((p) => h('div', { class: 'tk-pause', style: { left: pct(p.start), width: width(p.start, p.end) } })),
-    gaps.map((g) => h('div', { class: 'tk-gap', style: { left: pct(g.start), width: width(g.start, g.end) } })),
-    errors.map((e) => h('div', { class: 'tk-error', style: { left: pct(e.ts) } })));
+    gaps.map((g) => h('div', { class: 'tk-gap', style: { left: pct(g.start), width: width(g.start, g.end) } })));
   const bandPauses = pauses.map((p) => h('div', { class: 'tk-pause tk-pause--band', style: { left: pct(p.start), width: width(p.start, p.end) } }));
 
   const el = h('div', {
@@ -420,7 +419,6 @@ function mount() {
     return { ...span, n, prompt, label: `Task ${n}: ${prompt}`, short: `${n}. ${prompt}` };
   });
   const counts = taskCounts(spans, tasks);
-  const errors = log.filter((e) => e.type === 'error' || e.type === 'rejection');
   // Same verdict and gap list as the summary and the overlay's pre-download line.
   const saved = audioReport({ session, log, events, audio: savedSegments, dropped: data.audioDropped });
   const { gaps } = saved;
@@ -511,7 +509,6 @@ function mount() {
       spans,
       pauses,
       gaps,
-      errors,
       onSeek: seek,
       onToggle: toggle,
     });
@@ -531,8 +528,7 @@ function mount() {
     const entries = log.filter((e) => e.ts >= span.start && e.ts <= span.end);
     const active = span.end - span.start - overlapMs(span.start, span.end, pauses);
     const badges = [];
-    const errCount = entries.filter((e) => e.type === 'error' || e.type === 'rejection').length;
-    if (errCount) badges.push(h('span', { class: 'tk-badge tk-badge--danger' }, `${errCount} error${errCount > 1 ? 's' : ''}`));
+    // Page errors are not shown: this is a usability test, not a code test.
     if (detectRageClicks(entries).length) badges.push(h('span', { class: 'tk-badge' }, 'Rage clicks'));
     if (span.task?.timeLimit && active > span.task.timeLimit * 1000) badges.push(h('span', { class: 'tk-badge' }, 'Over time limit'));
     if (span.skipped) badges.push(h('span', { class: 'tk-badge' }, 'Skipped'));
@@ -632,8 +628,7 @@ function mount() {
     h('ul', { class: 'tk-legend', 'aria-label': 'Legend' },
       h('li', {}, h('span', { class: 'tk-swatch tk-swatch--task' }), 'Task'),
       h('li', {}, h('span', { class: 'tk-swatch tk-swatch--pause' }), `Paused (${pauses.length})`),
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--gap' }), `Audio gap (${gaps.length})`),
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--error' }), `Error (${errors.length})`)),
+      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--gap' }), `Audio gap (${gaps.length})`)),
     h('div', { class: 'tk-audio' },
       h('span', { class: 'tk-audio-label' }, 'Audio'),
       audioStatus,
