@@ -528,6 +528,10 @@ id="testkit-root">` appended to `<html>` (not `<body>`, so prototype body
 re-renders can't remove it). Everything inside the shadow root is excluded from
 rrweb (`blockClass: 'testkit-block'`) and from the interaction log.
 
+The pause toggle is `data-fid="pause"` while it reads Pause and
+`data-fid="resume"` while it reads Resume; keyboard focus follows it across the
+switch.
+
 Task controls: **Skip task** (`data-fid="skip-task"`, a plain secondary button
 before the primary Next task/Finish, disabled while paused, hidden during a
 follow-up question and in free exploration) calls `skipTask()`. Next, Skip task and the follow-up buttons advance at most

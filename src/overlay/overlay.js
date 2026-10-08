@@ -298,6 +298,7 @@ function mount(controller) {
       announce('Before you start: review consent and check your microphone.');
     } else if (to === 'recording') {
       if (from === 'paused') {
+        if (shadow.activeElement?.dataset?.fid === 'resume') ui.focusNext = 'pause';
         announce('Recording resumed.');
       } else {
         ui.timeUp = false;
@@ -306,6 +307,8 @@ function mount(controller) {
         announce(`Recording started. ${taskAnnouncement()}`);
       }
     } else if (to === 'paused') {
+      // The toggle's data-fid follows its label; keep focus on it.
+      if (shadow.activeElement?.dataset?.fid === 'pause') ui.focusNext = 'resume';
       announce('Recording paused.');
     } else if (to === 'stopped' && from === 'preflight') {
       // Setup cancelled: back to the session it was started from.
@@ -993,7 +996,7 @@ function mount(controller) {
       actions.push(h(
         'div',
         { class: 'tk-row' },
-        btn(paused ? 'Resume' : 'Pause', { fid: 'pause', onclick: togglePause }),
+        btn(paused ? 'Resume' : 'Pause', { fid: paused ? 'resume' : 'pause', onclick: togglePause }),
         canMute
           ? btn(state.muted ? 'Unmute' : 'Mute', { fid: 'mute', disabled: paused, onclick: () => act(() => controller.toggleMute()) })
           : null,

@@ -404,7 +404,7 @@ scenarios.A = async (browser) => {
   r.pausedBadgeNotLive = (await state(page)).audio.status !== 'live';
   r.pauseCopy = await page.locator('.tk-notice.is-warn').first().textContent();
   await sleep(2500);
-  await fid(page, 'pause').click(); // Resume
+  await fid(page, 'resume').click();
   const resumeAt = Date.now();
   await waitAudio(page, 'live');
   await sleep(2500);
@@ -933,7 +933,7 @@ async function seqGapPipeline(browser) {
   await sleep(4500);
   await fid(page, 'pause').click();
   await waitPhase(page, 'paused');
-  await fid(page, 'pause').click();
+  await fid(page, 'resume').click();
   await waitAudio(page, 'live');
   await sleep(5000);
   await openPanel(page);
@@ -1122,6 +1122,17 @@ scenarios.I = async (browser) => {
   await openPanel(page);
   await fid(page, 'start').click();
   await startScreenOnly();
+  // The pause toggle's data-fid follows its label, and keyboard focus stays on it.
+  await fid(page, 'pause').focus();
+  await page.keyboard.press('Enter');
+  await waitPhase(page, 'paused');
+  r.pausedToggle = await page.evaluate(() => document.querySelector('#testkit-root').shadowRoot.activeElement?.dataset.fid);
+  r.pausedLabel = await fid(page, 'resume').textContent();
+  await page.keyboard.press('Enter');
+  await waitPhase(page, 'recording');
+  r.resumedToggle = await page.evaluate(() => document.querySelector('#testkit-root').shadowRoot.activeElement?.dataset.fid);
+  assert.deepEqual([r.pausedToggle, r.pausedLabel, r.resumedToggle], ['resume', 'Resume', 'pause']);
+  assert.equal(await fid(page, 'pause').textContent(), 'Pause');
   // Double clicks advance once, including on the second-to-last task.
   await fid(page, 'skip-task').dblclick();
   await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 1, null, { what: 'task 2' });
