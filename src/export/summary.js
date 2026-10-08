@@ -61,6 +61,34 @@ export function shortUrl(url, baseUrl) {
   }
 }
 
+const pathKey = (url) => {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return String(url).split(/[?#]/)[0];
+  }
+};
+
+// Unique pages in visit order, starting with the page the session started
+// on. A replaceState that only rewrites the query/hash of the page just
+// listed (hosts syncing state into the URL) updates that entry instead of
+// adding one.
+export function pagesVisited({ session = {}, log = [], baseUrl = null } = {}) {
+  const urls = [];
+  const first = session.meta?.prototypeUrl || session.segments?.[0]?.url;
+  if (first) urls.push(first);
+  for (const e of log) {
+    if (e.type !== 'nav' || e.navType === 'beforeunload') continue;
+    const url = e.to || e.url;
+    if (!url) continue;
+    const last = urls[urls.length - 1];
+    if (e.navType === 'replaceState' && last && pathKey(last) === pathKey(url)) urls[urls.length - 1] = url;
+    else urls.push(url);
+  }
+  return [...new Set(urls.map((u) => shortUrl(u, baseUrl)))];
+}
+
 function quote(text, max = 80) {
   const clean = String(text).replace(/\s+/g, ' ').trim();
   const cut = clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
@@ -545,7 +573,7 @@ export function buildSummary({ session = {}, log = [], events = [], audio, audio
   const mutes = log.filter((e) => e.type === 'mute').length;
   if (mutes) lines.push(`- Muted: ${mutes}×`);
   lines.push(`- Pauses: ${pauses.length ? `${pauses.length} (${formatDuration(pausedTotal)} total)` : 'none'}`);
-  const pages = [...new Set(log.filter((e) => e.type === 'nav' && e.navType !== 'beforeunload').map((e) => shortUrl(e.to || e.url, baseUrl)))];
+  const pages = pagesVisited({ session, log, baseUrl });
   if (pages.length) lines.push(`- Pages visited: ${pages.join(', ')}`);
   lines.push(`- Page loads: ${session.segments?.length ?? 'unknown'}`);
   lines.push('');

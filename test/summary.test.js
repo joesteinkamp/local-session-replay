@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   audioGaps, audioReport, buildSummary, buildTaskSpans, GAPS_MEANING, LOST_SEGMENT_REASON, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
-  detectRageClicks, formatDuration, formatTrailLine, overlapMs, pausedSpans, shortUrl, taskCounts, taskStatus,
+  detectRageClicks, formatDuration, formatTrailLine, overlapMs, pagesVisited, pausedSpans, shortUrl, taskCounts, taskStatus,
 } from '../src/export/summary.js';
 
 const T = 1_760_000_000_000;
@@ -485,4 +485,22 @@ test('sub-threshold audio-gap entries are labelled, and "none" names the thresho
   const md = buildSummary({ session, log, audio });
   assert.ok(md.includes('- Audio gaps: none of 0.5s or more'), md);
   assert.ok(md.includes('audio-gap 0.4s (under 0.5s, not counted as a gap)'), md);
+});
+
+test('Pages visited starts with the start page and folds query-only replaceState rewrites', () => {
+  const base = 'https://app.test/list';
+  const session = { study: 's', startedAt: at(0), endedAt: at(30), meta: { prototypeUrl: base } };
+  const nav = (s, navType, to) => ({ ts: at(s), type: 'nav', navType, from: null, to, url: to });
+  const log = [
+    nav(2, 'pushState', 'https://app.test/item?title=A'),
+    nav(3, 'replaceState', 'https://app.test/item?title=A%20B'), // host syncs state into the query
+    nav(4, 'replaceState', 'https://app.test/item?title=A%20B%20C'),
+    nav(5, 'beforeunload', null),
+    nav(6, 'pushState', 'https://app.test/settings'),
+    nav(7, 'replaceState', 'https://app.test/other'), // a different path is a new page
+  ];
+  assert.deepEqual(pagesVisited({ session, log, baseUrl: base }), ['/list', '/item?title=A%20B%20C', '/settings', '/other']);
+  assert.ok(buildSummary({ session, log }).includes('- Pages visited: /list, /item?title=A%20B%20C, /settings, /other'));
+  // No navigations at all: the start page is still listed.
+  assert.ok(buildSummary({ session, log: [] }).includes('- Pages visited: /list'));
 });

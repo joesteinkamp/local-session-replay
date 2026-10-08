@@ -467,6 +467,10 @@ recording time outside pauses not covered by any audio segment (≥0.5 s),
 computed from `audio` when given, else from `audio-gap` log entries. With none,
 the line reads `- Audio gaps: none of 0.5s or more`; a trail `audio-gap` entry
 shorter than that is suffixed `(under 0.5s, not counted as a gap)`.
+`- Pages visited:` (`pagesVisited()`) lists unique pages in visit order,
+starting with the session's first page (`meta.prototypeUrl`, else the first
+segment's URL); a `replaceState` that changes only the query/hash of the page
+just listed updates that entry instead of adding one.
 `audioReport({ session, log, events, audio, dropped }) → { kind, label, gaps, … }`
 is the single saved-audio verdict — **Audio recorded** / **Audio recorded with
 gaps** / **No audio recorded** — used by the summary (`- Audio saved:` line), the
