@@ -903,6 +903,9 @@ export async function createController({ config, store, deps = {} }) {
         }
         const consentAt = Date.now();
         const useAudio = config.audio.enabled && wantAudio !== false;
+        // The preflight level check showed 'live'; in a session that means a
+        // chunk was saved, which hasn't happened yet.
+        if (useAudio && state.audio.status === 'live') setAudio({ status: 'pending' });
         const startMic = useAudio && !audio?.isLive() ? await acquireMic(() => state.phase === 'preflight') : null;
         if (!useAudio) {
           await releaseAudio();

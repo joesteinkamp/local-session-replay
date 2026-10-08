@@ -882,3 +882,31 @@ test('a player load that can only be retried by reloading (package build) says s
   assert.equal(s.phase, 'stopped');
   assert.equal(s.error, 'The replay player couldn’t load. Reload and download again — your session is saved.');
 });
+
+test("Start never carries the preflight mic check's 'live' into the session", async () => {
+  const { deps, seen } = fakeDeps();
+  const store = memoryStore();
+  const controller = await createController({ config, store, deps });
+  await controller.beginPreflight();
+  await controller.requestMic();
+  assert.equal(controller.getState().audio.status, 'live', 'preflight level check');
+  let release;
+  const created = store.createSession;
+  store.createSession = async (rec) => {
+    await new Promise((r) => (release = r));
+    return created(rec);
+  };
+  const statuses = [];
+  controller.subscribe((s) => statuses.push(s.audio.status));
+  const starting = controller.start({ consent: true, audio: true });
+  await settle();
+  const whileCreating = controller.getState().audio.status;
+  release(); // before asserting, so a failure can't leave start() hanging
+  await starting;
+  assert.equal(whileCreating, 'pending', 'while the session is being created');
+  assert.equal(controller.getState().audio.status, 'pending');
+  assert.ok(!statuses.includes('live'), statuses.join(','));
+  seen.capture.emit();
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live', 'live once a chunk is saved');
+});
