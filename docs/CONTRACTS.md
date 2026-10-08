@@ -506,7 +506,9 @@ Task controls: **Skip task** (`data-fid="skip-task"`, a plain secondary button
 before the primary Next task/Finish, disabled while paused, hidden during a
 follow-up question and in free exploration) calls `skipTask()`. Next, Skip task and the follow-up buttons advance at most
 once per click: the second click of a double click (`event.detail > 1`) is
-ignored, a press while the previous call is in flight is ignored, and the call
+ignored, a press while the previous call is in flight is ignored (the guard
+lets go after 10 s if a call never settles, so the buttons can't stay dead
+until reload), and the call
 carries `taskIndex` so the controller drops a stale one. The stopped panel
 shows "N of M completed, K skipped" and **Start new session**
 (`data-fid="new-session"`; confirm buttons `confirm-download`,

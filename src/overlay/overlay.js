@@ -9,6 +9,7 @@ import {
   MIC_PASS_LEVEL,
   canSkipTask,
   canStart,
+  createAdvanceGuard,
   clamp,
   consentText,
   createMicCheck,
@@ -160,7 +161,6 @@ function mount(controller) {
     timeUp: false,
     finishedLast: false, // tester pressed Finish on the last task (this page load)
     skipped: false, // the task change in flight came from Skip task
-    advancing: false, // a Next/Skip call is in flight
     focusNext: null, // data-fid to focus after the next render
     forceFocus: false, // focus even if focus wasn't inside the overlay
   };
@@ -444,14 +444,10 @@ function mount(controller) {
   // One task change per click: a double click (or a second press before the
   // controller answers) must not advance twice. The controller also ignores a
   // call whose taskIndex is no longer current.
+  const advanceGuard = createAdvanceGuard();
   function advanceOnce(fn) {
-    if (ui.advancing) return;
-    ui.advancing = true;
     const taskIndex = state.taskIndex;
-    const done = () => {
-      ui.advancing = false;
-    };
-    Promise.resolve(act(() => fn(taskIndex))).then(done, done);
+    advanceGuard.run(() => act(() => fn(taskIndex)));
   }
 
   // Secondary to Next: the task ends as skipped, not completed; no follow-up.

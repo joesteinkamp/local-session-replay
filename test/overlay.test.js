@@ -1,9 +1,10 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EDGE_MARGIN,
   canSkipTask,
   canStart,
+  createAdvanceGuard,
   consentText,
   createMicCheck,
   describeDuration,
@@ -187,4 +188,52 @@ test('canSkipTask: only for a scripted task, never in free exploration', () => {
   assert.equal(canSkipTask({ tasks: [], taskIndex: 0 }), false);
   assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 0 }), true);
   assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 1 }), false);
+});
+
+test('advance guard: drops presses while a call is in flight, and lets go of a call that never settles', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const guard = createAdvanceGuard({ timeoutMs: 10_000 });
+    let calls = 0;
+    const never = () => {
+      calls++;
+      return new Promise(() => {});
+    };
+    guard.run(never);
+    assert.equal(guard.run(never), false, 'second press dropped');
+    assert.equal(calls, 1);
+    mock.timers.tick(9_999);
+    assert.equal(guard.busy, true);
+    mock.timers.tick(1);
+    assert.equal(guard.busy, false, 'released after the timeout');
+    guard.run(() => {
+      calls++;
+      return Promise.resolve();
+    });
+    assert.equal(calls, 2, 'Next works again');
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(guard.busy, false, 'a settled call releases at once');
+    assert.throws(() => guard.run(() => { throw new Error('sync'); }));
+    assert.equal(guard.busy, false, 'a throwing call releases');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('advance guard: a timed-out call that settles late does not release a newer one', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const guard = createAdvanceGuard({ timeoutMs: 100 });
+    let finishFirst;
+    guard.run(() => new Promise((r) => { finishFirst = r; }));
+    mock.timers.tick(100);
+    guard.run(() => new Promise(() => {})); // the newer call holds the guard
+    finishFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(guard.busy, true);
+  } finally {
+    mock.timers.reset();
+  }
 });
