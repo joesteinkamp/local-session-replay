@@ -836,3 +836,22 @@ test('free exploration (no tasks): nextTask() and skipTask() record nothing and 
   assert.equal(s.tasksSkipped, 0);
   assert.equal(store.log.filter((e) => e.type === 'task-end').length, 0);
 });
+
+// The mirror carries the count across a navigation whose IndexedDB write was
+// aborted at unload (MIRRORED in session.js must list tasksSkipped).
+test('tasksSkipped survives a navigation that aborted the IndexedDB write', async () => {
+  const store = memoryStore();
+  const mirrors = new Map();
+  store.setSessionMirror = (m) => mirrors.set(m.id, structuredClone(m));
+  store.getSessionMirror = (id) => mirrors.get(id) ?? null;
+  store.clearSessionMirror = (id) => mirrors.delete(id);
+  const { controller } = await startSession({ store });
+  await controller.skipTask();
+  const id = controller.getState().sessionId;
+  Object.assign(store.sessions.get(id), { tasksSkipped: 0, taskIndex: 0, rev: 1 }); // the write never landed
+  const next = await createController({ config, store, deps: fakeDeps().deps });
+  const s = next.getState();
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.taskIndex, 1);
+  assert.equal(s.tasksSkipped, 1);
+});

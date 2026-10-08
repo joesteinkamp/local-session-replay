@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EDGE_MARGIN,
+  canSkipTask,
   canStart,
   consentText,
   createMicCheck,
@@ -179,4 +180,11 @@ test('previousDownloadText: says when the previous file was handed to the browse
   const text = previousDownloadText(new Date(2026, 9, 8, 14, 12).getTime());
   assert.match(text, /downloaded at .*12/);
   assert.match(text, /Cancel to download it again/);
+});
+
+test('canSkipTask: only for a scripted task, never in free exploration', () => {
+  assert.equal(canSkipTask({ tasks: [], taskIndex: -1 }), false);
+  assert.equal(canSkipTask({ tasks: [], taskIndex: 0 }), false);
+  assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 0 }), true);
+  assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 1 }), false);
 });

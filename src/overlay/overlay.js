@@ -7,6 +7,7 @@ import {
   EDGE_MARGIN,
   MIC_LABELS,
   MIC_PASS_LEVEL,
+  canSkipTask,
   canStart,
   clamp,
   consentText,
@@ -954,7 +955,7 @@ function mount(controller) {
       actions.push(h(
         'div',
         { class: 'tk-row' },
-        total && task ? btn('Skip task', { fid: 'skip-task', disabled: paused, onclick: onSkip }) : null,
+        canSkipTask(state) ? btn('Skip task', { fid: 'skip-task', disabled: paused, onclick: onSkip }) : null,
         btn(total ? (isLast ? 'Finish' : 'Next task') : 'Finish session', {
           variant: 'is-primary is-grow',
           fid: 'next',

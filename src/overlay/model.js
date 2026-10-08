@@ -116,6 +116,12 @@ export function previousDownloadText(ts) {
   return `The previous session’s file was downloaded at ${formatClock(ts)}. If it isn’t in your downloads folder, choose Cancel to download it again.`;
 }
 
+// Skip task is offered only for a scripted task: free exploration has
+// nothing to skip (its Finish is Stop).
+export function canSkipTask(state) {
+  return Boolean(state?.tasks?.length && state.tasks[state.taskIndex]);
+}
+
 // Tasks the tester skipped (controller count; older controllers report none).
 export function tasksSkipped(state) {
   const total = state.tasks?.length || 0;
