@@ -1191,6 +1191,48 @@ scenarios.I = async (browser) => {
   return r;
 };
 
+// J: 14 log entries in one millisecond keep their order in the export (row
+// keys `<batchId>:l<n>` alone sort l10 before l2).
+scenarios.J = async (browser) => {
+  const r = {};
+  const context = await browser.newContext({ acceptDownloads: true });
+  const page = await context.newPage();
+  await page.goto(`${DEMO}/index.html?test=1`);
+  await page.locator('#testkit-root').waitFor({ state: 'attached' });
+  await page.evaluate(async () => {
+    const c = window.TestKit.controller;
+    await c.beginPreflight();
+    await c.start({ consent: true, audio: false });
+  });
+  await sleep(2500); // the start batch flushes, so the clicks start a batch at l0
+  r.clicked = await page.evaluate(() => {
+    const ids = [];
+    for (let i = 0; i < 14; i++) {
+      const b = document.createElement('button');
+      b.id = `b${String(i).padStart(2, '0')}`;
+      b.textContent = b.id;
+      document.querySelector('main').append(b);
+      ids.push(b.id);
+    }
+    const t = Date.now();
+    for (const id of ids) document.getElementById(id).click();
+    return { ids, sameMs: Date.now() === t };
+  });
+  await sleep(2500);
+  await page.evaluate(() => window.TestKit.controller.stop());
+  await waitPhase(page, 'stopped');
+  await openPanel(page);
+  const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+  const file = path.join(outDir, 'J-order.html');
+  await download.saveAs(file);
+  const payload = await readExport(file);
+  r.exported = payload.log.filter((e) => e.type === 'click' && /^#b\d/.test(e.selector)).map((e) => e.selector.slice(1));
+  assert.deepEqual(r.exported, r.clicked.ids);
+  await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+  return r;
+};
+
 // ---------------------------------------------------------------------------
 
 async function main() {

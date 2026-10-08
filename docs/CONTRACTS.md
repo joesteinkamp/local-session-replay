@@ -98,8 +98,8 @@ DB `testkit`, version 1. Object stores:
 | store | key | indexes | value |
 | :-- | :-- | :-- | :-- |
 | `sessions` | `id` | — | `SessionRecord` |
-| `events` | autoInc | `sessionId` | `{ sessionId, segmentId, ts, events: rrwebEvent[] }` (chunk) |
-| `log` | autoInc | `sessionId` | `LogEntry & { sessionId }` |
+| `events` | autoInc | `sessionId` | `{ sessionId, segmentId, ts, page, seq, events: rrwebEvent[] }` (chunk) |
+| `log` | autoInc | `sessionId` | `LogEntry & { sessionId, page, seq }` |
 | `audio` | autoInc | `sessionId` | `{ sessionId, audioSegmentId, seq, ts, startTs, mime, blob }` (`ts` = chunk arrival; `startTs` = its segment's start) |
 
 Pointers are scoped **per study** (`<study>` = normalized `config.study`), so
@@ -159,7 +159,13 @@ Store API (all async):
 `openStore()`, `createSession(rec)`, `getSession(id)`, `updateSession(id, patch)`,
 `appendEvents(sessionId, segmentId, events[])`, `appendLog(sessionId, entry)`,
 `appendAudio(sessionId, chunk)`, `loadSessionData(id) → { session, events, log, audio, audioDropped }`
-(events flattened and sorted by `timestamp`; log sorted by `ts`; audio grouped by
+(events flattened and sorted by `timestamp`; log sorted by `ts`; ties keep write
+order: every log row and event chunk carries `page` (the writing page's
+`performance.timeOrigin`, so a later page load sorts after an earlier one) and
+`seq` (append order on that page), and sorting is by `(ts, page, seq)` — row keys
+can't be used, since `<random batchId>:l<n>` compares as a string (l10 < l2,
+batches in random order). Rows written before `page`/`seq` existed fall back to
+the key's index within their batch; `page`/`seq` are stripped from `log` output; audio grouped by
 `groupAudioChunksReport`: `[{ audioSegmentId, startTs, endTs, mime, blob, seqGaps? }]` with
 chunks concatenated in `seq` order; a segment without `seq` 0 is unplayable and moves to
 `audioDropped: [{ audioSegmentId, startTs, endTs, mime, chunks, reason: 'missing-first-chunk' }]`;

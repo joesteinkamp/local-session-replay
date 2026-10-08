@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chunkEvents, elapsedMsFor, flattenEventChunks, groupAudioChunks, groupAudioChunksReport, sortLog } from '../src/core/store.js';
+import { chunkEvents, compareWriteOrder, elapsedMsFor, flattenEventChunks, groupAudioChunks, groupAudioChunksReport, sortLog } from '../src/core/store.js';
 
 test('chunkEvents splits on session/segment changes and stamps the first timestamp', () => {
   const pending = [
@@ -73,4 +73,38 @@ test('groupAudioChunksReport: seq continuity — a missing seq 0 drops the segme
   assert.deepEqual(dropped.map(({ audioSegmentId, reason, chunks }) => ({ audioSegmentId, reason, chunks })),
     [{ audioSegmentId: 'headless', reason: 'missing-first-chunk', chunks: 2 }]);
   assert.deepEqual(groupAudioChunks([chunk('headless', 1, 3000)]), []);
+});
+
+// IndexedDB hands rows back in key order: `<batchId>:l<n>` compares as a
+// string, so l10 < l2 and a random batch id can sort a later batch first.
+const keyOrder = (rows) => [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+test('sortLog keeps 14 same-millisecond entries in write order (page, seq)', () => {
+  const rows = Array.from({ length: 14 }, (_, i) => ({ id: `batch:l${i}`, sessionId: 's', ts: 100, type: 'click', selector: `#b${i}`, page: 1, seq: i + 1 }));
+  const log = sortLog(keyOrder(rows));
+  assert.deepEqual(log.map((e) => e.selector), rows.map((r) => r.selector));
+  assert.deepEqual(Object.keys(log[0]).sort(), ['selector', 'ts', 'type'], 'storage fields stripped');
+});
+
+test('sortLog: a click before the nav it caused, across batches and page loads', () => {
+  const rows = [
+    { id: 'zzz:l0', sessionId: 's', ts: 50, type: 'click', page: 1, seq: 7 },
+    { id: 'aaa:l0', sessionId: 's', ts: 50, type: 'nav', navType: 'pushState', page: 1, seq: 8 }, // later batch, smaller key
+    { id: 'mmm:l0', sessionId: 's', ts: 50, type: 'session-resume', page: 2, seq: 1 }, // next page load, seq restarts
+  ];
+  assert.deepEqual(sortLog(keyOrder(rows)).map((e) => e.type), ['click', 'nav', 'session-resume']);
+});
+
+test('sortLog: rows from before page/seq order by key index within a batch (l2 before l10)', () => {
+  const rows = Array.from({ length: 12 }, (_, i) => ({ id: `old:l${i}`, sessionId: 's', ts: 100, n: i }));
+  assert.deepEqual(sortLog(keyOrder(rows)).map((e) => e.n), rows.map((r) => r.n));
+});
+
+test('flattenEventChunks: same-timestamp events across chunks keep write order', () => {
+  const chunks = [
+    { id: 'aaa:e0', ts: 5, page: 1, seq: 2, events: [{ timestamp: 5, n: 'second' }] },
+    { id: 'zzz:e0', ts: 4, page: 1, seq: 1, events: [{ timestamp: 4, n: 'zero' }, { timestamp: 5, n: 'first' }] },
+  ];
+  assert.deepEqual(flattenEventChunks(chunks).map((e) => e.n), ['zero', 'first', 'second']);
+  assert.equal(compareWriteOrder({ seq: 1, page: 2 }, { seq: 9, page: 1 }) > 0, true, 'a later page load sorts after');
 });

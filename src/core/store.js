@@ -20,6 +20,13 @@ const MAX_PENDING_EVENTS = 500;
 const MAX_ATTEMPTS = 3;
 const FULL_SNAPSHOT = 2; // rrweb EventType.FullSnapshot
 
+// Write order, for ties on ts: IndexedDB returns rows in key order, and keys
+// (`<random batchId>:l<n>`) sort neither across batches nor past l9. Every
+// log row and event chunk carries `page` (this page load's navigation start,
+// so a later page sorts after an earlier one) and `seq` (append order here).
+const PAGE = Number(globalThis.performance?.timeOrigin) || Date.now();
+let rowSeq = 0;
+
 let db = null;
 let dbPromise = null;
 let lifecycleInstalled = false;
@@ -49,19 +56,35 @@ export function chunkEvents(pending) {
   return chunks;
 }
 
+// `<batchId>:<e|l><n>` → [batchId, n]; rows written before page/seq existed
+// can still be ordered within their batch.
+function keyParts(id) {
+  const m = /^(.*):[el](\d+)$/.exec(typeof id === 'string' ? id : '');
+  return m ? [m[1], Number(m[2])] : null;
+}
+
+/** Write order of two stored rows (log entries or event chunks); 0 if unknown. */
+export function compareWriteOrder(a, b) {
+  if (Number.isFinite(a.seq) && Number.isFinite(b.seq)) return (a.page ?? 0) - (b.page ?? 0) || a.seq - b.seq;
+  const ka = keyParts(a.id);
+  const kb = keyParts(b.id);
+  return ka && kb && ka[0] === kb[0] ? ka[1] - kb[1] : 0;
+}
+
 /** Flattens stored chunks into one event array ordered by rrweb timestamp. */
 export function flattenEventChunks(chunks) {
   const events = [];
-  for (const chunk of chunks) for (const e of chunk.events || []) events.push(e);
+  const ordered = [...chunks].sort((a, b) => compareWriteOrder(a, b) || (a.ts ?? 0) - (b.ts ?? 0));
+  for (const chunk of ordered) for (const e of chunk.events || []) events.push(e);
   // Array#sort is stable, so same-timestamp events keep their emit order
   // (rrweb's Meta and FullSnapshot often share a millisecond).
   return events.sort((a, b) => a.timestamp - b.timestamp);
 }
 
 export function sortLog(entries) {
-  return entries
-    .map(({ id, sessionId, ...entry }) => entry)
-    .sort((a, b) => a.ts - b.ts);
+  return [...entries]
+    .sort((a, b) => a.ts - b.ts || compareWriteOrder(a, b))
+    .map(({ id, sessionId, page, seq, ...entry }) => entry);
 }
 
 /**
@@ -243,7 +266,7 @@ export function flush() {
 // transaction that did commit and by a later spill import — collapse into one.
 function createBatch() {
   const batchId = newBatchId();
-  const events = chunkEvents(pendingEvents).map((chunk, i) => ({ ...chunk, id: `${batchId}:e${i}` }));
+  const events = chunkEvents(pendingEvents).map((chunk, i) => ({ ...chunk, id: `${batchId}:e${i}`, page: PAGE, seq: ++rowSeq }));
   const log = pendingLog.map((entry, i) => ({ ...entry, id: `${batchId}:l${i}` }));
   let settle;
   const batch = { events, log, waiter: pendingWaiter, attempts: 0 };
@@ -415,7 +438,7 @@ export function appendEvents(sessionId, segmentId, events) {
 
 /** Buffers a log entry. Resolves once written; never rejects. */
 export function appendLog(sessionId, entry) {
-  pendingLog.push({ ...entry, sessionId });
+  pendingLog.push({ ...entry, sessionId, page: PAGE, seq: ++rowSeq });
   const p = waiter();
   scheduleFlush(false);
   return p;
