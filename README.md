@@ -84,6 +84,12 @@ React 18 and 19 are supported. `examples/react/` is a working Vite app.
   deploy, a feature flag) if that matters.
 - **Unmounting doesn't stop a session.** Recording continues across route
   changes until the tester stops it in the overlay.
+- **Host dialogs and menus (MUI and similar focus traps):** while one is open,
+  the tester can click the TestKit bubble and use the panel with the keyboard;
+  the overlay keeps its focus events to itself so the trap doesn't pull focus
+  back. Tab from inside the host dialog still can't reach the overlay (that's
+  the dialog's job), and a trap that listens at `window` capture and was
+  registered before TestKit loaded can still interfere.
 - **Next.js App Router:** the entry is marked `'use client'`, so server
   components can render it. Functions can't be passed from a server component,
   so use a boolean (`activate={process.env.NODE_ENV !== 'production'}`) or

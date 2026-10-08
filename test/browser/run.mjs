@@ -1483,6 +1483,64 @@ scenarios.M = async (browser) => {
   return r;
 };
 
+// N: a host focus trap shaped like MUI's FocusTrap (document `focusin`
+// bubble listener that refocuses its root when document.activeElement is
+// outside it, a 50 ms BODY check, a capture keydown) plus a capture-phase
+// focusin trap (focus-trap style). With one open, the tester can still click
+// into the overlay and Tab through it; the traps still work for host focus.
+scenarios.N = async (browser) => {
+  const r = {};
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(`${DEMO}/index.html?test=1`);
+  await page.locator('#testkit-root').waitFor({ state: 'attached' });
+  await page.evaluate(() => {
+    const dialog = document.createElement('div');
+    dialog.id = 'host-dialog';
+    dialog.tabIndex = -1;
+    dialog.innerHTML = '<button id="in-a">A</button><button id="in-b">B</button>';
+    document.body.append(dialog, Object.assign(document.createElement('button'), { id: 'outside', textContent: 'Outside' }));
+    window.__pulls = { bubble: 0, capture: 0 };
+    const contain = (kind) => () => {
+      if (!dialog.contains(document.activeElement)) {
+        window.__pulls[kind]++;
+        dialog.focus();
+      }
+    };
+    document.addEventListener('focusin', contain('bubble'));
+    document.addEventListener('focusin', contain('capture'), true);
+    document.addEventListener('keydown', () => {}, true);
+    setInterval(() => document.activeElement?.tagName === 'BODY' && contain('bubble')(), 50);
+    document.getElementById('in-a').focus();
+  });
+  const inOverlay = () => page.evaluate(() => {
+    const root = document.querySelector('#testkit-root');
+    return document.activeElement === root && root.shadowRoot.activeElement?.dataset.fid || null;
+  });
+  await page.locator('.tk-bubble').click();
+  await page.locator('.tk-panel:not([hidden])').waitFor();
+  r.afterOpen = await inOverlay();
+  const tabbed = [];
+  // Idle panel: [collapse] [Start test session], focus starts on Start.
+  // Tabbing past the overlay's ends would leave it, trap or not.
+  for (const key of ['Shift+Tab', 'Tab', 'Shift+Tab']) {
+    await page.keyboard.press(key);
+    await sleep(120); // let the trap's interval run
+    tabbed.push((await inOverlay()) || (await page.evaluate(() => `outside:${document.activeElement?.id || document.activeElement?.tagName}`)));
+  }
+  r.tabbed = tabbed;
+  r.overlayPulls = await page.evaluate(() => ({ ...window.__pulls }));
+  // The host's own focus events still reach its traps.
+  await page.evaluate(() => document.getElementById('outside').focus());
+  r.hostTrapStillWorks = await page.evaluate(() => document.activeElement?.id === 'host-dialog');
+  assert.ok(r.afterOpen, 'focus is in the overlay after opening it');
+  assert.ok(tabbed.every((f) => !f.startsWith('outside:')), `Tab stays in the overlay: ${JSON.stringify(tabbed)}`);
+  assert.deepEqual(r.overlayPulls, { bubble: 0, capture: 0 }, 'no trap pulled focus out of the overlay');
+  assert.ok(r.hostTrapStillWorks, 'host focus events are untouched');
+  await context.close();
+  return r;
+};
+
 // ---------------------------------------------------------------------------
 
 async function main() {

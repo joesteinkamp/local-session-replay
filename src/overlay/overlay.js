@@ -1327,6 +1327,20 @@ function mount(controller) {
   const onKeyGuarded = guard(onKey);
   const KEY_EVENTS = ['keydown', 'keyup', 'keypress'];
 
+  // Host focus traps (MUI's FocusTrap listens for document `focusin` and
+  // pulls focus back into its dialog or menu whenever document.activeElement,
+  // which is our shadow host, is outside it). Focus moving within the overlay
+  // is none of the host's business, so focusin/focusout whose target is inside
+  // the overlay stop at window capture, like keys. Focus itself is unaffected
+  // (these events aren't cancelable), and events of the host's own elements
+  // are untouched. Same limitation: window capture listeners registered before
+  // TestKit loaded still see them.
+  function onFocusEvent(e) {
+    if (e.composedPath().includes(host)) e.stopImmediatePropagation();
+  }
+  const onFocusGuarded = guard(onFocusEvent);
+  const FOCUS_EVENTS = ['focusin', 'focusout'];
+
   const onResize = guard(() => applyPosition());
 
   bubble.addEventListener('pointerdown', guard(onPointerDown));
@@ -1335,6 +1349,7 @@ function mount(controller) {
   bubble.addEventListener('pointercancel', guard((e) => endDrag(e, true)));
   bubble.addEventListener('click', guard(onBubbleClick));
   for (const type of KEY_EVENTS) window.addEventListener(type, onKeyGuarded, true);
+  for (const type of FOCUS_EVENTS) window.addEventListener(type, onFocusGuarded, true);
   window.addEventListener('resize', onResize);
 
   let unsubscribe = null;
@@ -1358,6 +1373,7 @@ function mount(controller) {
       clearTimeout(announceTimer);
       window.removeEventListener('resize', onResize);
       for (const type of KEY_EVENTS) window.removeEventListener(type, onKeyGuarded, true);
+      for (const type of FOCUS_EVENTS) window.removeEventListener(type, onFocusGuarded, true);
       try {
         if (typeof unsubscribe === 'function') unsubscribe();
       } catch {

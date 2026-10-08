@@ -547,7 +547,14 @@ shows "N of M completed, K skipped" and **Start new session**
 Overlay-owned storage: `localStorage['testkit:overlay-pos']` = `{ side: 'left'|'right', y }`
 (bubble position, survives navigation); `sessionStorage['testkit:overlay-open']` =
 `'1'|'0'` (panel expanded, per tab). Key events inside the overlay stop at the shadow
-root so prototype shortcuts never fire while typing in it.
+root so prototype shortcuts never fire while typing in it (in fact at window
+capture). `focusin`/`focusout` whose target is inside the overlay stop there too,
+so a host focus trap (MUI's FocusTrap: a document `focusin` listener that refocuses
+its dialog when `document.activeElement`, i.e. our shadow host, is outside it)
+doesn't pull focus out of the overlay; the host's own focus events are untouched.
+Limits: window capture listeners registered before TestKit loaded still see them;
+with a modal host dialog open, Tab from the host can't reach the overlay (click
+the bubble), and Tab past the overlay's first/last control leaves it.
 
 ## Requests from overlay
 
