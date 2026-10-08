@@ -963,7 +963,7 @@ export async function createController({ config, store, deps = {} }) {
       const id = session.id;
       const isCurrent = () => gen === generation && session?.id === id && active();
       const gapStart = failedAt ?? Date.now();
-      setAudio({ status: 'reconnecting', error: null }); // progress shows at once
+      setAudio({ status: 'reconnecting', error: null, deviceChanged: false }); // progress shows at once
       retrying = (async () => {
         if (session.audio.stopAsking) {
           await persist({ audio: { ...audioFields(session.audio), stopAsking: false } });

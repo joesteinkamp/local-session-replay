@@ -3,6 +3,7 @@
 // position, open/collapsed, pre-flight checkbox progress, confirms, follow-up draft.
 import CSS from './styles.css';
 import {
+  AUDIO_COPY,
   EDGE_MARGIN,
   MIC_LABELS,
   MIC_PASS_LEVEL,
@@ -16,8 +17,11 @@ import {
   formatCountdown,
   formatElapsed,
   hasMovedPastThreshold,
+  audioAnnouncement,
+  audioNotice,
   micKind,
   parsePosition,
+  savedAudioText,
   snapPosition,
   taskRemainingMs,
   tasksCompleted,
@@ -147,6 +151,8 @@ function mount(controller) {
     exportResult: null,
     exportError: null,
     actionError: null,
+    micHelp: false, // "How to allow microphone" expanded
+    retrying: false,
     timeUp: false,
     finishedLast: false, // tester pressed Finish on the last task (this page load)
     focusNext: null, // data-fid to focus after the next render
@@ -247,6 +253,10 @@ function mount(controller) {
     const wasLocked = otherTab(prev);
     if (prev.phase !== next.phase) onPhaseChange(prev.phase, next.phase);
     else if (prev.taskIndex !== next.taskIndex && ACTIVE.has(next.phase)) onTaskChange();
+    if (ACTIVE.has(next.phase) && prev.phase === next.phase && !otherTab(next)) {
+      const said = audioAnnouncement(prev.audio, next.audio);
+      if (said) announce(said);
+    }
     if (otherTab() && !wasLocked) {
       ui.confirm = null;
       ui.followUpFor = null;
@@ -348,19 +358,41 @@ function mount(controller) {
   function skipAudio() {
     ui.pre.audioSkipped = true;
     stopMeter();
-    announce('Continuing without audio.');
+    announce('Continuing without audio. Only your screen will be recorded.');
     ui.focusNext = 'use-mic';
     render();
   }
 
+  // Coming back to voice after "Continue without audio" needs the voice
+  // consent again and a fresh pass (or skip) of the mic check.
   function useMicAgain() {
     ui.pre.audioSkipped = false;
+    ui.pre.consent = false;
+    ui.pre.micPassed = false;
     ui.focusNext = 'test-mic';
     if (ui.pre.mic === 'ok') {
-      ui.focusNext = 'start-session';
+      ui.focusNext = 'consent';
       startMeter();
     }
     render();
+  }
+
+  function retryMic() {
+    if (ui.retrying) return;
+    ui.retrying = true;
+    ui.micHelp = false;
+    render();
+    const done = guard(() => {
+      ui.retrying = false;
+      render();
+    });
+    act(() => Promise.resolve(controller.retryMic?.()).finally(done));
+  }
+
+  function continueWithoutMic() {
+    ui.micHelp = false;
+    announce('Continuing without microphone. The screen is still recording.');
+    act(() => controller.continueWithoutMic?.());
   }
 
   function startSession() {
@@ -412,7 +444,7 @@ function mount(controller) {
     render();
   }
 
-  function doExport() {
+  function doExport(options) {
     if (ui.exporting) return;
     ui.exporting = true;
     ui.exportError = null;
@@ -424,7 +456,7 @@ function mount(controller) {
       render();
     });
     try {
-      Promise.resolve(controller.exportSession())
+      Promise.resolve(options ? controller.exportSession(options) : controller.exportSession())
         .then(
           (res) => {
             ui.exportResult = res || {};
@@ -463,7 +495,6 @@ function mount(controller) {
       }
       if (!ui.pre.micPassed && micCheck.sample(level, t)) {
         ui.pre.micPassed = true;
-        // The focused "Continue without audio" button disappears on pass.
         ui.focusNext = ui.pre.consent ? 'start-session' : 'consent';
         announce('Microphone check passed. We can hear you.');
         render();
@@ -483,6 +514,8 @@ function mount(controller) {
     return JSON.stringify([
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
+      state.audio?.stopAsking, state.audio?.deviceChanged, state.savedAudio, state.exportWithoutAudio,
+      ui.micHelp, ui.retrying,
       state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
       ui.actionError, ui.timeUp,
@@ -546,8 +579,8 @@ function mount(controller) {
   }
 
   function micIndicator() {
-    const kind = micKind(state.audio);
-    const off = kind !== 'live' && kind !== 'pending';
+    const kind = micKind(state.audio, state.phase);
+    const off = kind !== 'live' && kind !== 'pending' && kind !== 'reconnecting';
     return h(
       'span',
       { class: `tk-mic is-${kind}`, title: MIC_LABELS[kind] },
@@ -741,7 +774,8 @@ function mount(controller) {
         pre.micPassed
           ? notice('✓ We can hear you. Your microphone is working.', 'ok')
           : h('p', { class: 'tk-p is-strong', text: 'Say something — the check passes once we hear you.' }),
-        pre.micPassed ? null : h('div', { class: 'tk-row' }, btn('Continue without audio', { fid: 'skip-audio', onclick: skipAudio })),
+        // Stays available after a pass: choosing it switches to screen-only consent.
+        h('div', { class: 'tk-row' }, btn('Continue without audio', { fid: 'skip-audio', onclick: skipAudio })),
       );
     }
     return h('div', { class: 'tk-card', role: 'group', 'aria-labelledby': 'tk-mic-h' }, ...parts);
@@ -828,13 +862,11 @@ function mount(controller) {
       );
     }
 
-    if (paused) out.push(notice('Recording is paused. Nothing is captured until you resume.', 'warn'));
-    if (audio.enabled && (audio.status === 'denied' || audio.status === 'error')) {
-      out.push(notice(
-        `Microphone unavailable${audio.error ? ` (${errorMessage(audio.error)})` : ''} — audio isn’t being recorded.`,
-        'warn',
-      ));
+    if (paused) {
+      const holdsMic = audio.enabled && !audio.stopAsking && audio.status !== 'off';
+      out.push(h('p', { class: 'tk-notice is-warn' }, AUDIO_COPY.paused, holdsMic ? h('br') : null, holdsMic ? AUDIO_COPY.pausedMic : null));
     }
+    out.push(...audioRecovery(audio));
 
     if (showFollowUp) {
       out.push(h(
@@ -886,7 +918,7 @@ function mount(controller) {
         ),
       ));
     } else {
-      const canMute = audio.enabled && (audio.status === 'live' || audio.status === 'muted');
+      const canMute = audio.enabled && (audio.status === 'live' || audio.status === 'muted' || audio.status === 'pending');
       actions.push(h(
         'div',
         { class: 'tk-row' },
@@ -900,6 +932,55 @@ function mount(controller) {
     }
     out.push(h('div', { class: 'tk-actions' }, ...actions));
     return out;
+  }
+
+  // Recovery notice + controls for the mic; visual recording is unaffected.
+  function audioRecovery(audio) {
+    const kind = audioNotice(audio);
+    const detail = audio.error ? h('span', { class: 'tk-notice-detail' }, ` (${errorMessage(audio.error)})`) : null;
+    const quietRow = (...buttons) => h('div', { class: 'tk-row' }, ...buttons);
+    const without = btn('Continue without microphone', { fid: 'mic-without', onclick: continueWithoutMic });
+    switch (kind) {
+      case 'stopped':
+        return [
+          h('p', { class: 'tk-notice is-error' }, AUDIO_COPY.stopped, detail),
+          quietRow(btn('Retry microphone', { variant: 'is-primary', fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic }), without),
+        ];
+      case 'blocked':
+        return [
+          h('p', { class: 'tk-notice is-error' }, AUDIO_COPY.blocked),
+          ui.micHelp
+            ? h('div', { class: 'tk-card' },
+              h('p', { class: 'tk-p', id: 'tk-mic-help', text: AUDIO_COPY.blockedHelp }),
+              quietRow(btn('Try again', { variant: 'is-primary', fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic })))
+            : null,
+          quietRow(
+            ui.micHelp ? null : btn('How to allow microphone', {
+              variant: 'is-primary',
+              fid: 'mic-help',
+              'aria-expanded': 'false',
+              onclick: () => {
+                ui.micHelp = true;
+                ui.focusNext = 'mic-retry';
+                render();
+              },
+            }),
+            without,
+          ),
+        ];
+      case 'reconnecting':
+        return [h('p', { class: 'tk-notice is-warn tk-inline' }, h('span', { class: 'tk-spinner', 'aria-hidden': 'true' }), AUDIO_COPY.reconnecting)];
+      case 'off':
+        return [
+          h('p', { class: 'tk-notice' }, AUDIO_COPY.off),
+          quietRow(btn('Turn microphone back on', { fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic })),
+        ];
+      default:
+        if (audio.enabled && audio.deviceChanged && (audio.status === 'live' || audio.status === 'muted')) {
+          return [h('p', { class: 'tk-notice' }, AUDIO_COPY.deviceChanged), quietRow(btn('Retry microphone', { fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic }))];
+        }
+        return [];
+    }
   }
 
   function stoppedView() {
@@ -925,7 +1006,11 @@ function mount(controller) {
       // We only know the download was handed to the browser, not that it landed.
       out.push(notice(`Download started: ${res.filename || 'session file'}${size}. Check your downloads folder; if it isn’t there, use Download again.`, 'ok'));
     }
-    if (ui.exportError && !exporting) out.push(notice(`Export failed: ${ui.exportError}`, 'error'));
+    const saved = savedAudioText(state.savedAudio);
+    if (saved) out.push(h('p', { class: `tk-notice${state.savedAudio.kind === 'recorded' ? ' is-ok' : state.savedAudio.kind === 'gaps' ? ' is-warn' : ''}`, 'data-saved-audio': state.savedAudio.kind }, saved));
+    // The controller's message already starts with "Export failed:" (or is the
+    // exact audio-too-large copy); don't prefix it twice.
+    if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
     if (!res && !exporting && !ui.exportError) {
       out.push(h('p', { class: 'tk-p', text: 'The recording is saved in this browser until you download or discard it.' }));
     }
@@ -939,9 +1024,12 @@ function mount(controller) {
         fid: 'download',
         disabled: exporting,
         'aria-busy': exporting ? 'true' : null,
-        onclick: doExport,
+        onclick: () => doExport(),
       },
     )));
+    if (state.exportWithoutAudio && !exporting) {
+      out.push(h('div', { class: 'tk-row' }, btn('Download without audio', { fid: 'download-visual', onclick: () => doExport({ withoutAudio: true }) })));
+    }
 
     if (ui.confirm === 'discard') {
       out.push(h(
