@@ -147,7 +147,8 @@ SessionRecord = {
   taskStartedAt|null,              // current task start, shifted forward by pauses
   tasksCompleted,                  // tasks ended via nextTask()
   tasksSkipped,                    // tasks ended via skipTask() (absent on older records = 0)
-  exportedAt?,                     // set when exportSession() handed a file to the browser
+  exportedAt?,                     // set when exportSession() handed a full file (with all saved audio) to the browser
+  exportedWithoutAudioAt?,         // set by a visual-only export ({ withoutAudio: true }) of a session that has audio
   rev,                             // bumped on every controller update (see testkit:mirror)
   lastActivityAt,                  // refreshed on every controller update and ~15 s heartbeat
 }
@@ -240,6 +241,7 @@ controller.getState() → {
                                 // stopped only: the pre-download verdict (audioReport)
   exportWithoutAudio,           // true after the audio could not be encoded into the file
   downloaded,                   // stopped only: SessionRecord.exportedAt is set (persisted, survives reloads)
+  downloadedWithoutAudio,       // stopped only: exportedWithoutAudioAt is set (the audio exists only in IndexedDB)
   otherTab,                     // true when another tab is capturing this session (read-only here)
   error|null,
 }
@@ -273,14 +275,16 @@ also allowed from `stopped`. The stopped session stays in IndexedDB and stays
 named by `testkit:last` throughout setup (a reload during setup shows it again);
 `cancelPreflight()` returns to it (re-read from the store) instead of `idle`.
 Once `start()` has created the new session, the previous one is **deleted if it
-was downloaded** (`exportedAt` set: it would only fill storage, unreachable),
+was downloaded** (`exportedAt` set: it would only fill storage, unreachable;
+a without-audio export does not count, since the file lacks the audio),
 and **left in IndexedDB otherwise** (never deleted without a download or an
 explicit `discard()`; `start()` still clears `testkit:last`, so it is reachable
 only through IndexedDB). The overlay therefore never starts over from an
 undownloaded session without asking: its "Start new session" goes straight to
 setup when `downloaded`, else confirms with **Download first** (exports, stays on
 the stopped panel) / **Discard and start new** (`discard()` then
-`beginPreflight()`) / **Cancel**. Rejected: keeping several stopped sessions
+`beginPreflight()`) / **Cancel**. After a without-audio download the confirm says
+the audio wasn't downloaded and offers **Try with audio** instead of Download first. Rejected: keeping several stopped sessions
 reachable (needs a session listing in store.js and a picker in the overlay), and
 "Start anyway (it stays saved)", which would promise data the overlay can't
 show again. The active pointer and stale logic are untouched: they only ever

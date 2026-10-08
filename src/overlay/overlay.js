@@ -439,9 +439,13 @@ function mount(controller) {
     act(() => controller.skipTask());
   }
 
+  // A full download (audio included) counts; a visual-only one doesn't.
+  const downloadedFully = () => Boolean(state.downloaded || (ui.exportResult && !ui.exportResult.withoutAudio));
+  const downloadedVisualOnly = () => !downloadedFully() && Boolean(state.downloadedWithoutAudio || ui.exportResult?.withoutAudio);
+
   // From a downloaded session this goes straight to setup; otherwise ask first.
   function onNewSession() {
-    if (state.downloaded || ui.exportResult) {
+    if (downloadedFully()) {
       act(() => controller.beginPreflight());
       return;
     }
@@ -540,7 +544,7 @@ function mount(controller) {
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
       state.audio?.stopAsking, state.audio?.deviceChanged, state.savedAudio, state.exportWithoutAudio,
-      state.downloaded, state.tasksCompleted, state.tasksSkipped,
+      state.downloaded, state.downloadedWithoutAudio, state.tasksCompleted, state.tasksSkipped,
       ui.micHelp, ui.retrying,
       state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
@@ -1019,7 +1023,8 @@ function mount(controller) {
     const done = tasksCompleted(state, { finishedLast: ui.finishedLast });
     const exporting = ui.exporting || state.phase === 'exporting';
     const res = ui.exportResult;
-    const downloaded = Boolean(res || state.downloaded);
+    const downloaded = downloadedFully();
+    const visualOnly = downloadedVisualOnly();
     const out = [
       h('h2', { class: 'tk-h', text: total && done + tasksSkipped(state) >= total ? 'Session complete' : 'Session stopped' }),
       h(
@@ -1044,9 +1049,10 @@ function mount(controller) {
     // exact audio-too-large copy); don't prefix it twice.
     if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
     if (!res && !exporting && !ui.exportError) {
-      out.push(h('p', { class: 'tk-p', text: state.downloaded
-        ? 'You downloaded this session earlier. It stays in this browser until you discard it or start a new session.'
-        : 'The recording is saved in this browser until you download or discard it.' }));
+      let text = 'The recording is saved in this browser until you download or discard it.';
+      if (state.downloaded) text = 'You downloaded this session earlier. It stays in this browser until you discard it or start a new session.';
+      else if (state.downloadedWithoutAudio) text = 'You downloaded this session without its audio. The audio is saved only in this browser until you discard it.';
+      out.push(h('p', { class: 'tk-p', text }));
     }
 
     out.push(h('div', { class: 'tk-row' }, btn(
@@ -1069,7 +1075,9 @@ function mount(controller) {
       out.push(h(
         'div',
         { class: 'tk-card', role: 'group', 'aria-labelledby': 'tk-new-q' },
-        h('p', { class: 'tk-p is-strong', id: 'tk-new-q', text: 'This session hasn’t been downloaded. Download it before starting a new one, or discard it.' }),
+        h('p', { class: 'tk-p is-strong', id: 'tk-new-q', text: visualOnly
+          ? 'This session’s audio wasn’t downloaded: the file you saved has no audio. Try downloading it with audio before starting a new one, or discard it.'
+          : 'This session hasn’t been downloaded. Download it before starting a new one, or discard it.' }),
         h(
           'div',
           { class: 'tk-row is-end' },
@@ -1079,7 +1087,7 @@ function mount(controller) {
             fid: 'confirm-discard-new',
             onclick: () => act(() => Promise.resolve(controller.discard()).then(() => controller.beginPreflight())),
           }),
-          btn('Download first', {
+          btn(visualOnly ? 'Try with audio' : 'Download first', {
             variant: 'is-primary',
             fid: 'confirm-download',
             onclick: () => {
@@ -1106,7 +1114,7 @@ function mount(controller) {
         h('p', {
           class: 'tk-p is-strong',
           id: 'tk-discard-q',
-          text: `Delete this session from this device?${downloaded ? '' : ' You haven’t downloaded it yet.'} This can’t be undone.`,
+          text: `Delete this session from this device?${downloaded ? '' : visualOnly ? ' Its audio hasn’t been downloaded.' : ' You haven’t downloaded it yet.'} This can’t be undone.`,
         }),
         h(
           'div',

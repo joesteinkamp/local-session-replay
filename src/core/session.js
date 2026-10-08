@@ -116,6 +116,7 @@ export async function createController({ config, store, deps = {} }) {
       savedAudio: null,
       exportWithoutAudio: false,
       downloaded: false,
+      downloadedWithoutAudio: false,
       otherTab: false,
       error: null,
     };
@@ -627,6 +628,7 @@ export async function createController({ config, store, deps = {} }) {
       savedAudio: null,
       exportWithoutAudio: false,
       downloaded: !!session.exportedAt,
+      downloadedWithoutAudio: !!session.exportedWithoutAudioAt,
       otherTab: false,
       error: null,
     };
@@ -1081,10 +1083,15 @@ export async function createController({ config, store, deps = {} }) {
           const { filename, blob, html, bytes } = await buildExport(data, { withoutAudio });
           if (!blob && typeof html !== 'string') throw new Error('Exporter returned no file');
           download(filename, blob ?? html);
-          // Not persist(): a stopped session has no mirror or active pointer to refresh.
-          session.exportedAt = Date.now();
-          await store.updateSession(session.id, { exportedAt: session.exportedAt }).catch(reportError);
-          set({ phase: 'stopped', downloaded: true });
+          // Only a file with every saved byte counts as downloaded: a visual-only
+          // file leaves the audio in this browser alone, so starting over must
+          // still ask. Not persist(): a stopped session has no mirror or active
+          // pointer to refresh.
+          const full = !withoutAudio || !data.audio?.length;
+          const field = full ? 'exportedAt' : 'exportedWithoutAudioAt';
+          session[field] = Date.now();
+          await store.updateSession(session.id, { [field]: session[field] }).catch(reportError);
+          set({ phase: 'stopped', ...(full ? { downloaded: true } : { downloadedWithoutAudio: true }) });
           return { filename, bytes, withoutAudio };
         } catch (err) {
           console.warn('[TestKit] export failed', err);

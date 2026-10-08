@@ -19,7 +19,7 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
     audio: { enabled: audioEnabled, status: 'off', error: null },
     tasksCompleted: 0,
     tasksSkipped: 0,
-    downloaded: false,
+    downloaded: false, downloadedWithoutAudio: false,
     error: null,
   };
 
@@ -45,7 +45,7 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
     beginPreflight() {
       if (state.phase !== 'idle' && state.phase !== 'stopped') return;
       previous = state.phase === 'stopped' ? state : null;
-      set({ phase: 'preflight', sessionId: 'mock-1', downloaded: false, savedAudio: null });
+      set({ phase: 'preflight', sessionId: 'mock-1', downloaded: false, downloadedWithoutAudio: false, savedAudio: null });
     },
     cancelPreflight() {
       if (previous) {
@@ -78,7 +78,7 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
         endedAt: null,
         tasksCompleted: 0,
         tasksSkipped: 0,
-        downloaded: false,
+        downloaded: false, downloadedWithoutAudio: false,
         taskIndex: 0,
         taskStartedAt: now,
         audio: audio({ enabled: withAudio && audioEnabled, status: withAudio ? 'live' : 'off' }),
@@ -122,14 +122,14 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
         : { kind: 'none', label: 'No audio recorded', gaps: 0, gapMs: 0, segments: 0, unreliable: 0, dropped: 0 };
       set({ phase: 'stopped', endedAt: Date.now(), savedAudio, audio: audio({ status: 'off' }) });
     },
-    exportSession() {
+    exportSession({ withoutAudio = false } = {}) {
       set({ phase: 'exporting' });
       return new Promise((resolve) => setTimeout(() => {
-        set({ phase: 'stopped', downloaded: true });
-        resolve({ filename: `testkit-${study}-20261006-1412.html`, bytes: 2_431_000 });
+        set({ phase: 'stopped', ...(withoutAudio ? { downloadedWithoutAudio: true } : { downloaded: true }) });
+        resolve({ withoutAudio, filename: `testkit-${study}-20261006-1412.html`, bytes: 2_431_000 });
       }, 700));
     },
-    discard: () => set({ phase: 'idle', sessionId: null, taskIndex: -1, startedAt: null, endedAt: null, taskStartedAt: null, tasksCompleted: 0, tasksSkipped: 0, downloaded: false }),
+    discard: () => set({ phase: 'idle', sessionId: null, taskIndex: -1, startedAt: null, endedAt: null, taskStartedAt: null, tasksCompleted: 0, tasksSkipped: 0, downloaded: false, downloadedWithoutAudio: false }),
     // Test hook: jump straight into a phase.
     _set: set,
   };

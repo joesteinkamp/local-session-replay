@@ -778,3 +778,28 @@ test('a downloaded session is marked, survives a reload as downloaded, and is de
   assert.equal(store.sessions.has(oldId), false);
   assert.equal(store.sessions.size, 1);
 });
+
+test('a without-audio download does not count as downloaded: the audio is never deleted by starting over', async () => {
+  const { store, controller } = await startSession({ audio: true });
+  await controller.stop();
+  const oldId = controller.getState().sessionId;
+  const rec = savedSession(store);
+  store.loadSessionData = async () => ({
+    session: structuredClone(rec), events: [], log: [],
+    audio: [{ audioSegmentId: 'a', startTs: rec.startedAt, endTs: rec.endedAt, mime: 'audio/webm', blob: new Blob(['x']) }], audioDropped: [],
+  });
+  await withDownloadStubs(() => controller.exportSession({ withoutAudio: true }));
+  const s = controller.getState();
+  assert.equal(s.downloaded, false);
+  assert.equal(s.downloadedWithoutAudio, true);
+  assert.equal(store.sessions.get(oldId).exportedAt, undefined);
+  assert.ok(store.sessions.get(oldId).exportedWithoutAudioAt > 0, 'persisted');
+  const reloaded = await createController({ config, store, deps: fakeDeps().deps });
+  assert.equal(reloaded.getState().downloadedWithoutAudio, true);
+  await reloaded.beginPreflight();
+  await reloaded.start({ consent: true, audio: false });
+  assert.ok(store.sessions.has(oldId), 'the only copy of the audio stays');
+  // A full download afterwards does count.
+  await withDownloadStubs(() => controller.exportSession());
+  assert.equal(controller.getState().downloaded, true);
+});
