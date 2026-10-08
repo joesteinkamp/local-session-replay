@@ -191,13 +191,14 @@ npm install
 npm test          # node:test unit tests
 npm run build     # → public/v1/ + public/demo/ (Pages) and dist/ (the package)
 npm run serve     # build, then serve public/ on :8080 → /demo/index.html?test=1
-npm run example:react   # build, then serve examples/react on :5181 → /?test=1
-npm run check:package   # pack the tarball, install it into scratch apps (React 18/19, no React), import both entries
+npm run example:react   # build, install examples/react, serve it on :5181 → /?test=1
+npm run check:package   # pack the tarball; install it into scratch apps (React 18/19, no React); import and type-check both entries
 ```
 
-`examples/react/` is an npm workspace that links this package, so `npm install`
-at the root installs it too. Its link doesn't run `prepare`, which is why
-`example:react` builds first.
+`examples/react/` has its own install (not a workspace, so a GitHub install of
+the package never pulls Vite). It links this package with `file:../..`, which
+doesn't run `prepare`, so `example:react` builds first; Vite's
+`resolve.dedupe` keeps the app and the package on one React.
 
 Module boundaries and data formats are in `docs/CONTRACTS.md`.
 `scripts/fixture-export.mjs` writes a synthetic export for working on the player.
