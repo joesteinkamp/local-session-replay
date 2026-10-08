@@ -1075,6 +1075,113 @@ scenarios.G = async (browser) => {
   return r;
 };
 
+// I: product gaps found in a real-app integration (no audio needed).
+//  - a redirect that strips ?test=1 before init() still activates (snapshot)
+//  - Skip task shows as Skipped in the stopped panel, summary and player
+//  - Start new session: straight to setup once downloaded (the downloaded
+//    session is deleted when the next starts); otherwise asks first
+scenarios.I = async (browser) => {
+  const r = {};
+  const context = await browser.newContext({ acceptDownloads: true });
+  // Like a router beforeLoad redirect: the URL loses ?test=1 between the
+  // package's first evaluation and init().
+  await context.route(`${DEMO}/redirect.html*`, (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Redirect</title>
+      <link rel="stylesheet" href="styles.css">
+      <script src="../v1/testkit.js"></script>
+      <script>history.replaceState(null, '', 'redirect.html#signal-report');</script>
+      <script src="testkit-config.js"></script></head>
+      <body><main><h1>Signal report</h1></main></body></html>`,
+  }));
+  const page = await context.newPage();
+  await page.goto(`${DEMO}/redirect.html?test=1`);
+  await page.locator('#testkit-root').waitFor({ state: 'attached', timeout: 10_000 });
+  r.redirectSearch = await page.evaluate(() => location.search);
+  assert.equal(r.redirectSearch, '', 'the redirect dropped the param');
+
+  const sessionsInDb = () => page.evaluate(async () => {
+    const db = await new Promise((res) => {
+      const q = indexedDB.open('testkit');
+      q.onsuccess = () => res(q.result);
+    });
+    const ids = await new Promise((res) => {
+      const q = db.transaction('sessions').objectStore('sessions').getAllKeys();
+      q.onsuccess = () => res(q.result);
+    });
+    db.close();
+    return ids;
+  });
+  const startScreenOnly = async () => {
+    await fid(page, 'skip-audio').click();
+    await fid(page, 'consent').check();
+    await fid(page, 'start-session').click();
+    await waitPhase(page, 'recording');
+  };
+
+  await openPanel(page);
+  await fid(page, 'start').click();
+  await startScreenOnly();
+  await fid(page, 'skip-task').click();
+  await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 1, null, { what: 'task 2' });
+  await fid(page, 'next').click();
+  await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 2, null, { what: 'task 3' });
+  await fid(page, 'skip-task').click(); // task 3 has a follow-up: Skip bypasses it
+  await waitPhase(page, 'stopped');
+  r.panelTally = await page.locator('.tk-meta dd').nth(2).textContent();
+  r.panelHeading = await page.locator('.tk-h').textContent();
+  const firstId = (await state(page)).sessionId;
+  const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+  const file = path.join(outDir, 'I-skipped.html');
+  await download.saveAs(file);
+  const payload = await readExport(file);
+  r.summaryTasks = payload.summaryMarkdown.split('\n').find((l) => l.startsWith('- Tasks completed:'));
+  r.summaryStatuses = payload.summaryMarkdown.split('\n').filter((l) => l.startsWith('- Status:'));
+  const player = await openPlayer(context, file);
+  r.playerTasks = await player.locator('.tk-meta').textContent();
+  r.playerSkippedBadges = await player.locator('.tk-badge', { hasText: 'Skipped' }).count();
+  await player.close();
+  assert.equal(r.panelTally, '1 of 3 completed, 2 skipped');
+  assert.equal(r.panelHeading, 'Session complete');
+  assert.equal(r.summaryTasks, '- Tasks completed: 1 of 3, 2 skipped');
+  assert.deepEqual(r.summaryStatuses, ['- Status: Skipped', '- Status: Completed', '- Status: Skipped']);
+  assert.match(r.playerTasks, /1 of 3 completed, 2 skipped/);
+  assert.equal(r.playerSkippedBadges, 2);
+
+  // Downloaded: Start new session goes straight to setup; Cancel comes back.
+  await fid(page, 'new-session').click();
+  await waitPhase(page, 'preflight');
+  await fid(page, 'cancel').click();
+  await waitPhase(page, 'stopped');
+  r.backToSame = (await state(page)).sessionId === firstId;
+  await fid(page, 'new-session').click();
+  await waitPhase(page, 'preflight');
+  await startScreenOnly();
+  const secondId = (await state(page)).sessionId;
+  r.afterSecondStart = await sessionsInDb();
+  assert.ok(r.backToSame, 'Cancel returns to the stopped session');
+  assert.deepEqual(r.afterSecondStart, [secondId], 'the downloaded session was deleted once the next one started');
+
+  // Not downloaded: asks first; Download first, then straight to setup.
+  await fid(page, 'stop').click();
+  await fid(page, 'confirm-yes').click();
+  await waitPhase(page, 'stopped');
+  await fid(page, 'new-session').click();
+  r.confirmText = await page.locator('#tk-new-q').textContent();
+  r.phaseWhileAsking = (await state(page)).phase;
+  await Promise.all([page.waitForEvent('download'), fid(page, 'confirm-download').click()]);
+  await waitFor(page, () => window.TestKit.controller.getState().downloaded === true, null, { what: 'downloaded' });
+  await fid(page, 'new-session').click();
+  await waitPhase(page, 'preflight');
+  assert.match(r.confirmText, /hasn’t been downloaded/);
+  assert.equal(r.phaseWhileAsking, 'stopped');
+  await fid(page, 'cancel').click();
+  await waitPhase(page, 'stopped');
+  await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+  return r;
+};
+
 // ---------------------------------------------------------------------------
 
 async function main() {
