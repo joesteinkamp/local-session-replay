@@ -162,11 +162,15 @@ mixed, the first one to run wins.
 3. Pre-flight: read the consent line aloud, tick consent, allow the mic, and
    say something until the level check passes. (Or continue without audio.)
 4. Give the tester control. They read the task, think aloud, and click
-   **Next task** when done. Works moderated or unmoderated: whoever has the
-   keyboard advances.
+   **Next task** when done, or **Skip task** to give up on one (the export
+   shows it as Skipped, not Completed). Works moderated or unmoderated:
+   whoever has the keyboard advances.
 5. **Pause** for interruptions, **Mute** for side conversations.
 6. After the last task (or **Stop**), click **Download session file**. Then
-   **Discard** to clear the data from the browser.
+   **Discard** to clear the data from the browser, or **Start new session**
+   for the next participant: a downloaded session is cleared from the browser
+   when the next one starts; if it hasn't been downloaded, TestKit asks you to
+   download or discard it first.
 
 Reloads, crashes, and page navigations resume the same session automatically.
 Expect 1–2 s of silence in the audio at each page load (marked on the timeline).
