@@ -8,11 +8,15 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const watch = process.argv.includes('--watch');
+// `--out-dir=<dir>` writes public/ and dist/ under <dir> instead of the repo
+// (tests build into a temp dir so `npm test` leaves the real outputs alone).
+const outDirArg = process.argv.find((a) => a.startsWith('--out-dir='));
+const outRoot = outDirArg ? path.resolve(outDirArg.slice('--out-dir='.length)) : root;
 const { version } = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 // Output path follows the major version (/v1/, /v2/, …) so a breaking release
 // never overwrites the path existing prototypes load.
-const out = path.join(root, 'public', `v${version.split('.')[0]}`);
-const dist = path.join(root, 'dist');
+const out = path.join(outRoot, 'public', `v${version.split('.')[0]}`);
+const dist = path.join(outRoot, 'dist');
 
 const common = {
   bundle: true,
@@ -80,8 +84,8 @@ async function buildAll() {
   await cp(out, path.join(dist, 'script'), { recursive: true });
   const esm = (await readdir(dist, { recursive: true })).filter((f) => f.endsWith('.js') && !f.startsWith('script'));
   await assertAscii(esm.map((f) => path.join(dist, f)));
-  await rm(path.join(root, 'public', 'demo'), { recursive: true, force: true });
-  await cp(path.join(root, 'demo'), path.join(root, 'public', 'demo'), { recursive: true });
+  await rm(path.join(outRoot, 'public', 'demo'), { recursive: true, force: true });
+  await cp(path.join(root, 'demo'), path.join(outRoot, 'public', 'demo'), { recursive: true });
 }
 
 await buildAll();

@@ -1,22 +1,29 @@
 // The built package (dist/): `./react` keeps 'use client' and leaves React to
 // the host, the root entry never imports React, and both entries share one
-// lazily imported core chunk. Runs the build first, so dist/ is fresh.
-import { test, before } from 'node:test';
+// lazily imported core chunk. Builds into a temp dir, so the repo's dist/ and
+// public/ are left alone.
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dist = path.join(root, 'dist');
+const outDir = mkdtempSync(path.join(tmpdir(), 'lsr-build-'));
+const dist = path.join(outDir, 'dist');
 const read = (file) => readFileSync(path.join(dist, file), 'utf8');
 // Static `import … from "x"` / `import "x"` specifiers (not dynamic import()).
 const staticImports = (code) => [...code.matchAll(/import\s*(?:[^'"()]*?from\s*)?["']([^"']+)["']/g)].map((m) => m[1]);
 
 before(() => {
-  execFileSync(process.execPath, [path.join(root, 'scripts/build.mjs')], { cwd: root, stdio: 'pipe' });
+  execFileSync(process.execPath, [path.join(root, 'scripts/build.mjs'), `--out-dir=${outDir}`], { cwd: root, stdio: 'pipe' });
+  // The built React entry imports `react` by bare name; resolve it from the repo.
+  symlinkSync(path.join(root, 'node_modules'), path.join(outDir, 'node_modules'), 'junction');
 });
+
+after(() => rmSync(outDir, { recursive: true, force: true }));
 
 test("dist/react.js starts with 'use client' and imports React as a bare specifier", () => {
   const code = read('react.js');
