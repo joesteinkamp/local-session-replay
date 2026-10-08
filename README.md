@@ -26,6 +26,11 @@ the package manager must be allowed to run it:
   `pnpm.onlyBuiltDependencies` in `package.json` (or run `pnpm approve-builds`)
   and reinstall.
 
+Installing from a tarball (`npm pack`) or a registry instead ships the built
+`dist/` already. npm may still warn that `prepare` is "not covered by
+allowScripts"; that warning is harmless there (nothing needs building), so
+there's nothing to approve.
+
 The package is ES modules only, so a CommonJS test runner (e.g. Jest) needs it
 transformed or mocked. Types ship with it.
 
