@@ -325,7 +325,10 @@ export async function createController({ config, store, deps = {} }) {
         if (!ended) store.appendLog(id, entry);
         if (entry.type === 'session-end') ended = true;
       },
-      onNavigationIntent: () => queueMicrotask(() => store.flush?.()),
+      onNavigationIntent: () => {
+        flushAudioTail();
+        queueMicrotask(() => store.flush?.());
+      },
     });
     owner = true;
     openChannel();
@@ -780,6 +783,14 @@ export async function createController({ config, store, deps = {} }) {
     },
     { capture: true },
   );
+
+  // A full navigation would otherwise lose the audio buffered since the last
+  // timeslice (up to 1 s): ask for it as soon as the page knows it's leaving,
+  // so its IndexedDB write has the whole unload to land.
+  function flushAudioTail() {
+    if (owner && state.phase === 'recording') audio?.requestData();
+  }
+  window.addEventListener('beforeunload', flushAudioTail, { capture: true });
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {

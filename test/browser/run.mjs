@@ -1423,6 +1423,55 @@ scenarios.L = async (browser) => {
   return r;
 };
 
+// M: audio tail at full navigations. A segment ends with its last stored
+// chunk; the time from there to the page's beforeunload is audio lost at the
+// navigation (up to one 1 s timeslice). Six navigations (link clicks and
+// page.goto, at varied offsets into the timeslice), then the tails are
+// measured from IndexedDB rows and the log.
+scenarios.M = async (browser) => {
+  const r = {};
+  const context = await browser.newContext({ acceptDownloads: true });
+  await context.grantPermissions(['microphone'], { origin: ORIGIN });
+  await context.addInitScript(INSTRUMENT);
+  const page = await context.newPage();
+  await startWithMic(page);
+  await beginRecording(page);
+  const waits = [2300, 2550, 2800, 3050, 2400, 2700];
+  for (let i = 0; i < waits.length; i++) {
+    await sleep(waits[i]);
+    if (i % 2 === 0) {
+      await page.locator('header a[href="about.html"]').click();
+      await page.waitForURL(/about\.html/);
+    } else {
+      await page.goto(`${DEMO}/index.html`);
+    }
+    await waitPhase(page, 'recording');
+    await waitAudio(page, 'live');
+  }
+  await sleep(2000);
+  const { file } = await stopAndDownload(page, 'M-nav-tail');
+  const payload = await readExport(file);
+  const unloads = payload.log.filter((e) => e.type === 'nav' && e.navType === 'beforeunload').map((e) => e.ts);
+  const segs = [...payload.audio].sort((a, b) => a.startTs - b.startTs);
+  r.tailsMs = unloads.map((t) => {
+    const seg = segs.filter((s) => s.startTs <= t).at(-1);
+    return seg ? t - seg.endTs : null;
+  });
+  const tails = r.tailsMs.filter((x) => x !== null);
+  r.meanTailMs = Math.round(tails.reduce((a, b) => a + b, 0) / Math.max(1, tails.length));
+  r.maxTailMs = Math.max(...tails);
+  r.segments = segs.length;
+  r.verdict = reportOf(payload).label;
+  assert.equal(unloads.length, waits.length);
+  // Measured 2026-10-08 (Chrome 155, localhost): mean ~493 ms without the
+  // requestData() at navigation intent, ~215 ms with it; max unchanged
+  // (~850 ms) when the chunk's IndexedDB write loses the race with unload.
+  assert.ok(r.meanTailMs < 350, `mean audio tail at navigation ${r.meanTailMs} ms`);
+  await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+  return r;
+};
+
 // ---------------------------------------------------------------------------
 
 async function main() {

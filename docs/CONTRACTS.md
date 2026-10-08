@@ -354,7 +354,11 @@ visible and takes over if the owner is gone.
 
 ## Audio (`src/core/audio.js`)
 
-MediaRecorder with `timeslice` ≈ 1000 ms (plus `requestData()` when the page is hidden), mime chosen via `isTypeSupported()`
+MediaRecorder with `timeslice` ≈ 1000 ms (plus `requestData()` when the page is hidden,
+on `beforeunload`, and on a link click or form submit, so a full navigation loses less of
+the last timeslice: harness scenario M measured the mean tail lost at a navigation
+dropping from ~493 ms to ~215 ms; the worst case is unchanged at ~850 ms, when the
+chunk's IndexedDB write loses the race with unload), mime chosen via `isTypeSupported()`
 (prefer `audio/webm;codecs=opus`, then `audio/mp4`, then `audio/ogg;codecs=opus`),
 `audioBitsPerSecond` = `config.audio.bitrate`. `getUserMedia({ audio: {
 echoCancellation: true, noiseSuppression: true } })`. Each MediaRecorder
