@@ -12,7 +12,7 @@ import { createInteractionLog } from './interaction-log.js';
 import { classifyMicError, createAudioCapture, micPermissionState, pickMimeType } from './audio.js';
 import { clip } from './selector.js';
 import { elapsedMsFor } from './store.js';
-import { exportSession as buildExport } from '../export/exporter.js';
+import { exportSession as buildExport, prefetchPlayer } from '../export/exporter.js';
 import { AUDIO_EXPORT_FAILED } from '../export/payload.js';
 import { audioReport } from '../export/summary.js';
 
@@ -662,6 +662,7 @@ export async function createController({ config, store, deps = {} }) {
     attachCapture();
     store.setActiveSessionId?.(session.study, session.id, session.lastActivityAt);
     state = stateFromSession(rec.phase);
+    prefetchPlayer(); // this page will be the one that exports
     if (rec.phase === 'recording') {
       startCapture({ pageLoad: true });
       log('session-resume', {});
@@ -945,6 +946,7 @@ export async function createController({ config, store, deps = {} }) {
         if (tasks.length) await beginTask(0);
         startTicker();
         emit();
+        prefetchPlayer(); // so Download works even if the tester goes offline later
       });
     },
 
@@ -993,6 +995,7 @@ export async function createController({ config, store, deps = {} }) {
         mark('testkit:resume', {});
         log('resume', {});
         startTicker();
+        prefetchPlayer();
         if (micWanted()) {
           const gen = generation;
           const isCurrent = () => gen === generation && state.phase === 'recording';

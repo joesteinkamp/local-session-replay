@@ -11,9 +11,15 @@ in the same edit and say so in your report.
   imports the host's React (plain `.js`, no JSX).
 - **No network egress.** No `fetch`/XHR/beacon/WebSocket to anything, ever. The
   only network activity TestKit causes is loading its own code from its own
-  origin: the loader injecting `testkit-core.js`, and, at export time, the
-  core injecting `testkit-player-source.js` from the same folder (script build)
-  or the host's bundler loading the player chunk (package build).
+  origin: the loader injecting `testkit-core.js`, and the core loading the
+  replay player: `testkit-player-source.js` from the same folder (script build)
+  or the player chunk via the host's bundler (package build). The player is
+  **prefetched** once an active session records (successful `start()`, a
+  restored recording/paused session, `resume()`) and kept in memory for the
+  page (`prefetchPlayer()` in exporter.js), so a tester who goes offline later
+  can still download; a failed prefetch is silent and the export loads it again
+  (and reports `Export failed: …` if that fails too). Idle pages and casual
+  viewers never load it.
 - **One time base:** every timestamp is wall-clock `Date.now()` milliseconds —
   the same clock rrweb stamps events with.
 - Bundled by esbuild (`scripts/build.mjs`). Import packages by name (`rrweb`,

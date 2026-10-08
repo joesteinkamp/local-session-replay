@@ -9,7 +9,7 @@ import { register } from 'node:module';
 register(
   `data:text/javascript,${encodeURIComponent(`
     export async function resolve(specifier, context, next) {
-      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,export const loadPlayerJs = async () => ""', shortCircuit: true };
+      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,globalThis.__playerLoads = (globalThis.__playerLoads || 0); export const loadPlayerJs = async () => { globalThis.__playerLoads++; return ""; }', shortCircuit: true };
       if (specifier === 'rrweb') return { url: 'data:text/javascript,export function record() {}', shortCircuit: true };
       return next(specifier, context);
     }`)}`,
@@ -189,6 +189,17 @@ async function startSession({ audio = false, store = memoryStore() } = {}) {
 function savedSession(store) {
   return [...store.sessions.values()][0];
 }
+
+// Must stay the first test that starts a session: the exporter caches the
+// player for the whole process, so later starts load nothing.
+test('only an active session prefetches the player: not on boot, not in setup, once on start', async () => {
+  const { deps } = fakeDeps();
+  const controller = await createController({ config, store: memoryStore(), deps });
+  await controller.beginPreflight();
+  assert.equal(globalThis.__playerLoads || 0, 0);
+  await controller.start({ consent: true, audio: false });
+  assert.equal(globalThis.__playerLoads, 1);
+});
 
 test('start → next ×3 counts every task and stops', async () => {
   const { store, seen, controller } = await startSession();

@@ -1197,6 +1197,8 @@ scenarios.J = async (browser) => {
   const r = {};
   const context = await browser.newContext({ acceptDownloads: true });
   const page = await context.newPage();
+  const sourceRequests = [];
+  page.on('request', (req) => /testkit-player-source/.test(req.url()) && sourceRequests.push(new URL(req.url()).pathname));
   await page.goto(`${DEMO}/index.html?test=1`);
   await page.locator('#testkit-root').waitFor({ state: 'attached' });
   await page.evaluate(async () => {
@@ -1224,12 +1226,11 @@ scenarios.J = async (browser) => {
   await page.evaluate(() => history.pushState(null, '', '/demo/app/deep/route'));
   await page.evaluate(() => window.TestKit.controller.stop());
   await waitPhase(page, 'stopped');
-  const sourceRequests = [];
-  page.on('request', (req) => /testkit-player-source/.test(req.url()) && sourceRequests.push(new URL(req.url()).pathname));
   await openPanel(page);
   const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
   r.playerSourceRequests = sourceRequests;
-  assert.deepEqual(sourceRequests, ['/v1/testkit-player-source.js'], 'loaded next to testkit-core.js, once, at export');
+  // Prefetched at start (before the pushState), next to testkit-core.js; the export reuses it.
+  assert.deepEqual(sourceRequests, ['/v1/testkit-player-source.js'], 'loaded next to testkit-core.js, once');
   const file = path.join(outDir, 'J-order.html');
   await download.saveAs(file);
   const payload = await readExport(file);
@@ -1269,6 +1270,8 @@ scenarios.K = async (browser) => {
     });
   });
   const page = await context.newPage();
+  const playerChunks = [];
+  page.on('request', (req) => /testkit-player-/.test(req.url()) && playerChunks.push(new URL(req.url()).pathname));
   await page.goto(`${ORIGIN}/pkg/app/?test=1`);
   await page.locator('#testkit-root').waitFor({ state: 'attached', timeout: 15_000 });
   r.search = await page.evaluate(() => location.search);
@@ -1281,8 +1284,6 @@ scenarios.K = async (browser) => {
   await page.evaluate(() => history.pushState(null, '', '/pkg/app/elsewhere/deeper'));
   await page.evaluate(() => window.TestKit.controller.stop());
   await waitPhase(page, 'stopped');
-  const playerChunks = [];
-  page.on('request', (req) => /testkit-player-/.test(req.url()) && playerChunks.push(new URL(req.url()).pathname));
   await openPanel(page);
   const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
   const file = path.join(outDir, 'K-package.html');
@@ -1299,6 +1300,73 @@ scenarios.K = async (browser) => {
   assert.ok(r.playerLoaded);
   await page.evaluate(() => window.TestKit.controller.discard());
   await context.close();
+  return r;
+};
+
+// L: the player is prefetched when recording starts, so an export works with
+// the player URL blocked afterwards (tester offline); blocked from the start,
+// the export fails with a clear error. Casual viewers never fetch it.
+scenarios.L = async (browser) => {
+  const r = {};
+  const PLAYER = '**/v1/testkit-player-source.js';
+  const requests = [];
+  const run = async ({ blockFromStart }) => {
+    const context = await browser.newContext({ acceptDownloads: true });
+    if (blockFromStart) await context.route(PLAYER, (route) => route.abort('internetdisconnected'));
+    const page = await context.newPage();
+    page.on('request', (req) => /testkit-player-source/.test(req.url()) && requests.push(blockFromStart ? 'blocked-run' : 'cached-run'));
+    await page.goto(`${DEMO}/index.html?test=1`);
+    await page.locator('#testkit-root').waitFor({ state: 'attached' });
+    await page.evaluate(async () => {
+      const c = window.TestKit.controller;
+      await c.beginPreflight();
+      await c.start({ consent: true, audio: false });
+    });
+    await sleep(1000);
+    if (!blockFromStart) await context.route(PLAYER, (route) => route.abort('internetdisconnected')); // goes offline after start
+    await page.evaluate(() => window.TestKit.controller.stop());
+    await waitPhase(page, 'stopped');
+    await openPanel(page);
+    return { context, page };
+  };
+
+  // Casual viewer: no ?test=1, no player request.
+  const casual = await browser.newContext();
+  const viewer = await casual.newPage();
+  let casualRequests = 0;
+  viewer.on('request', (req) => /testkit-player|testkit-core/.test(req.url()) && casualRequests++);
+  await viewer.goto(`${DEMO}/index.html`);
+  await sleep(500);
+  await casual.close();
+  r.casualRequests = casualRequests;
+
+  {
+    const { context, page } = await run({ blockFromStart: false });
+    const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+    const file = path.join(outDir, 'L-offline.html');
+    await download.saveAs(file);
+    const player = await openPlayer(context, file);
+    r.cachedExportPlays = await player.evaluate(() => !!window.TestKitPlayer?.data);
+    await player.close();
+    await page.evaluate(() => window.TestKit.controller.discard());
+    await context.close();
+  }
+  {
+    const { context, page } = await run({ blockFromStart: true });
+    await fid(page, 'download').click();
+    await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).waitFor({ timeout: 10_000 });
+    r.blockedError = await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).textContent();
+    r.blockedPhase = (await state(page)).phase;
+    await page.evaluate(() => window.TestKit.controller.discard());
+    await context.close();
+  }
+  r.requests = requests;
+  assert.equal(r.casualRequests, 0);
+  assert.ok(r.cachedExportPlays, 'export from the prefetched player opens');
+  assert.equal(requests.filter((x) => x === 'cached-run').length, 1, 'prefetched once; the export used the cache');
+  assert.match(r.blockedError, /Could not load the replay player/);
+  assert.equal(r.blockedPhase, 'stopped');
+  assert.equal(requests.filter((x) => x === 'blocked-run').length, 2, 'prefetch failed silently and the export retried');
   return r;
 };
 
