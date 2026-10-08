@@ -480,6 +480,15 @@ data, seekToWall, getOffset }` for automated checks.
    `document.currentScript` while the core evaluates, so SPA navigation can't
    change it) on the first export, and caches it. The player is ~270 kB, so the
    core stays under Vite's 500 kB chunk warning.
+   **Unhashed within `/v1/`:** `testkit-player-source.js` (like
+   `testkit-core.js`) has a fixed name per major version, so a page whose
+   core loaded before a deploy can fetch the player from after it (and a
+   host's HTTP cache can pair them the other way round). Within a major
+   version, every core must therefore produce a payload every player can read,
+   and every player must read every payload an older core of that major
+   writes: additive, optional fields only. A change that breaks this is a new
+   major version (`/v2/`). (The package build has no such skew: its player
+   chunk name is content-hashed and imported by the core that references it.)
 3. `src/loader.js` → `public/v1/testkit.js`.
 4. `src/index.js` → `dist/index.js` and `src/react/index.js` → `dist/react.js`
    (one ESM build, code-split: both entries share the boot chunk, and its
