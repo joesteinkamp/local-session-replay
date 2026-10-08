@@ -459,7 +459,7 @@ per task: status (**Skipped** when `task-end.reason === 'skipped'`; Completed on
 when `task-end.completed` is true; falls back to `session.tasksCompleted`; the
 header line reads `- Tasks completed: 2 of 3, 1 skipped`, the `, N skipped` part
 only when N > 0; the player header shows `2 of 3 completed, 1 skipped` and a
-Skipped badge — both via `taskCounts()`), duration, selector-level trail, errors, signals
+Skipped badge — both via `taskCounts()`), duration, selector-level trail, signals
 (rage clicks: ≥3 clicks on the same selector within 1 s; backtracking:
 navigating back to a previously visited URL or `popstate`; long idle: ≥20 s
 without log entries while recording; time limit; audio gaps). Audio gaps are

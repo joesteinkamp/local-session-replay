@@ -196,13 +196,14 @@ network requests, so anything the recording didn't embed (remote fonts, CSS
 background images, images with inlining off) shows up missing in the replay
 rather than loading from the prototype's server.
 
-- Replay with task markers, pause spans, audio gaps, and error ticks on a
+- Replay with task markers, pause spans, and audio gaps on a
   scrubbable timeline (keyboard: ←/→ 5 s, PgUp/PgDn 30 s, Home/End, Space).
 - Think-aloud audio synced to the replay, including speed changes.
 - **Copy agent summary** — per-task markdown: duration, selector-level
-  interaction trail, errors, and signals (rage clicks, backtracking, long
-  idle, time limit exceeded). Paste it into an AI agent alongside the
-  prototype's code.
+  interaction trail and signals (rage clicks, backtracking, long idle, time
+  limit exceeded). Paste it into an AI agent alongside the prototype's code.
+  Page errors are left out of the summary and the replay, since this is a
+  usability test rather than a code test; they stay in the raw JSON.
 - **Download raw JSON** — every rrweb event, log entry, and metadata field.
 
 ## Development
