@@ -1,14 +1,21 @@
-// <TestKit /> in a real React client render (happy-dom): effects run, so this
-// covers what the SSR test can't — props reach boot once, at mount, and a
-// failed boot is caught. Boot is injected via the internal createTestKit().
+// <TestKit /> in a real React client render: effects run, so this covers what
+// the SSR test can't — props reach boot once, at mount, and a failed boot is
+// caught. Boot is injected via the internal createTestKit().
+//
+// A component that renders null needs almost no DOM, so a few stub objects
+// stand in for one (react-dom/client reads exactly these during a commit)
+// instead of a DOM library: devDependencies are installed by every consumer's
+// GitHub install, which runs `prepare`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Window } from 'happy-dom';
 
-const win = new Window({ url: 'http://localhost/' });
-for (const key of ['window', 'document', 'navigator', 'localStorage', 'location']) {
-  Object.defineProperty(globalThis, key, { value: key === 'window' ? win : win[key], configurable: true, writable: true });
-}
+const noop = () => {};
+const document = { nodeType: 9, activeElement: null, addEventListener: noop, removeEventListener: noop };
+const newContainer = () => ({ nodeType: 1, nodeName: 'DIV', tagName: 'DIV', ownerDocument: document, addEventListener: noop, removeEventListener: noop });
+globalThis.window = { document, addEventListener: noop, removeEventListener: noop, HTMLIFrameElement: class {} };
+globalThis.document = document;
+globalThis.localStorage = { getItem: () => null };
+globalThis.location = { search: '' };
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 globalThis.__TESTKIT_VERSION__ = 'test';
 
@@ -27,7 +34,7 @@ function fakeBoot(impl = async () => {}) {
 }
 
 async function mount(element) {
-  const root = createRoot(document.body.appendChild(document.createElement('div')));
+  const root = createRoot(newContainer());
   await act(async () => root.render(element));
   return {
     rerender: (next) => act(async () => root.render(next)),
