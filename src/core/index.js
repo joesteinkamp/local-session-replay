@@ -1,5 +1,5 @@
 // public/v1/testkit-core.js — loaded by the loader only when testing is active.
-// Also the dynamic-import target of the package entry (src/index.js).
+// Also the dynamic-import target of the package entries (src/boot.js).
 import { normalizeConfig } from './config.js';
 import * as store from './store.js';
 import { createController } from './session.js';
@@ -19,7 +19,7 @@ async function boot(userConfig) {
   if (window.TestKit) window.TestKit.controller = controller; // for debugging & automated checks
 }
 
-/** Used by the package entry (src/index.js); the script-tag loader calls __TestKitCore.boot. */
+/** Used by the package entries (src/boot.js); the script-tag loader calls __TestKitCore.boot. */
 export const start = (config) => boot(config).catch((err) => console.error('[TestKit] boot failed', err));
 
 window.__TestKitCore = { boot: start };

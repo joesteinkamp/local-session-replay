@@ -7,7 +7,8 @@ in the same edit and say so in your report.
 ## Ground rules
 
 - Vanilla ES modules, no framework, no TypeScript. Browser targets: current
-  Chrome, Firefox, Safari (desktop).
+  Chrome, Firefox, Safari (desktop). The one exception is `src/react/`, which
+  imports the host's React (plain `.js`, no JSX).
 - **No network egress.** No `fetch`/XHR/beacon/WebSocket to anything, ever. The
   only network activity TestKit causes is the loader injecting
   `testkit-core.js` from its own base URL.
@@ -20,17 +21,51 @@ in the same edit and say so in your report.
 
 ```
 src/loader.js              → public/v1/testkit.js        (lead)
-src/index.js, index.d.ts   → dist/index.js (package entry) (lead)
-src/activation.js          — shared by loader.js and index.js (lead)
+src/index.js, index.d.ts   → dist/index.js (package entry `.`) (lead)
+src/react/index.js, react/TestKit.js, react.d.ts
+                           → dist/react.js (package entry `./react`) (lead)
+src/boot.js                — shared boot behind both package entries (lead)
+src/activation.js          — shared by loader.js and boot.js (lead)
 src/core/index.js          → public/v1/testkit-core.js   (lead: wiring/boot)
 src/core/config.js                                       (lead)
 src/core/store.js, session.js, recorder.js,
 src/core/interaction-log.js, selector.js, audio.js       (data/recorder agent)
 src/overlay/**                                           (overlay agent)
 src/export/**, src/player/** → public/v1/testkit-player.js (export/player agent)
-demo/**, scripts/**, .github/**, README.md              (lead)
+demo/**, examples/**, scripts/**, .github/**, README.md (lead)
 test/<module>.test.js     — each agent owns tests for its own modules (node:test)
 ```
+
+## Package entries (`local-session-replay`)
+
+In-app npm install is the primary distribution; the script tag (below, Build
+step 3) serves plain HTML pages.
+
+```js
+import { init, version } from 'local-session-replay';         // src/index.js
+import { TestKit, version } from 'local-session-replay/react'; // src/react/index.js
+```
+
+- `init(config?) → Promise<void>` is `boot()` from `src/boot.js`: no-op on the
+  server; otherwise takes the page-wide claim (`claimInit()`), sets
+  `window.TestKit = { init, version }` if absent, and, when `isActivated(config)`,
+  dynamically imports `src/core/index.js` and calls `start(config)`. A failed
+  chunk import rejects; the claim is not released (reload to retry).
+- `<TestKit {...config} />` calls `boot(props)` once from a mount effect
+  (`[]` deps) and renders `null`. Boot rejections are caught and logged as
+  `[TestKit] failed to start`. Props are `TestKitConfig`.
+- **Mount-once.** One claim per page, shared by both entries and the script-tag
+  loader: the first committed mount or `init()` call owns the configuration
+  even if it doesn't activate; later calls, prop changes, StrictMode/HMR
+  remounts, and other copies are ignored. Async activation = conditional mount.
+- **Unmount** never stops or tears down a session.
+- `window.TestKit` is the debugging/automation global; `src/core/index.js`
+  attaches `.controller` to it after boot.
+- The root entry never imports React. `./react` starts with `'use client'`
+  (must stay the first statement of `src/react/index.js`) and imports `react`
+  as a bare specifier; `react`/`react-dom` are optional peers (`^18 || ^19`).
+- `src/react.d.ts` imports `TestKitConfig` from `./index.js` and needs no
+  `@types/react`.
 
 ## Config (`src/core/config.js` → `normalizeConfig(userConfig)`)
 
@@ -278,10 +313,13 @@ data, seekToWall, getOffset }` for automated checks.
    `virtual:player-bundle` resolves to the text of step 1's output
    (`import PLAYER_JS from 'virtual:player-bundle'`).
 3. `src/loader.js` → `public/v1/testkit.js`.
-4. `src/index.js` → `dist/index.js` (ESM, code-split: the dynamic import of
-   `src/core/index.js` becomes `dist/chunks/core-*.js`, which exports
-   `start(config)`). `src/index.d.ts` and the three `public/v1/` files are
-   copied to `dist/`.
+4. `src/index.js` → `dist/index.js` and `src/react/index.js` → `dist/react.js`
+   (one ESM build, code-split: both entries share the boot chunk, and its
+   dynamic import of `src/core/index.js` becomes `dist/chunks/core-*.js`, which
+   exports `start(config)`; `react`/`react-dom` are external).
+   `src/index.d.ts`, `src/react.d.ts`, and the three `public/v1/` files are
+   copied to `dist/`. `test/package-build.test.js` checks the output;
+   `npm run check:package` checks the packed tarball in scratch consumers.
 5. `demo/` copied to `public/demo/`.
 
 ## Overlay (`src/overlay/overlay.js` → `mountOverlay(controller) → { destroy }`)
