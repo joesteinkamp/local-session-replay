@@ -35,12 +35,43 @@ export async function encodeAudio(audio = []) {
     if (!seg) continue;
     const dataUrl = seg.dataUrl || (seg.blob ? await blobToDataUrl(seg.blob, seg.mime) : null);
     if (!dataUrl) continue;
-    out.push({ audioSegmentId: seg.audioSegmentId, startTs: seg.startTs, endTs: seg.endTs, mime: seg.mime || null, dataUrl });
+    const item = { audioSegmentId: seg.audioSegmentId, startTs: seg.startTs, endTs: seg.endTs, mime: seg.mime || null };
+    if (Array.isArray(seg.seqGaps) && seg.seqGaps.length) item.seqGaps = seg.seqGaps;
+    out.push({ ...item, dataUrl });
   }
   return out.sort((a, b) => a.startTs - b.startTs);
 }
 
-export async function buildPayload({ session = {}, events = [], log = [], audio = [] }, { testkitVersion = null, now = Date.now() } = {}) {
+// Thrown when the audio can't be encoded into the file (too large for the
+// engine's string or memory limits). The visual replay can still be exported
+// with `{ withoutAudio: true }`.
+export const AUDIO_EXPORT_FAILED = 'The session file is too large to include the audio. Download the visual replay without audio instead.';
+
+export class AudioExportError extends Error {
+  constructor(cause) {
+    super(AUDIO_EXPORT_FAILED);
+    this.name = 'AudioExportError';
+    this.cause = cause;
+  }
+}
+
+/**
+ * `withoutAudio` exports the visual replay only; the summary still reports the
+ * audio that was saved (and that it was left out of this file).
+ */
+export async function buildPayload(
+  { session = {}, events = [], log = [], audio = [], audioDropped = [] },
+  { testkitVersion = null, now = Date.now(), withoutAudio = false } = {},
+) {
+  let encoded = [];
+  if (!withoutAudio) {
+    try {
+      encoded = await encodeAudio(audio);
+    } catch (err) {
+      throw new AudioExportError(err);
+    }
+  }
+  const summary = buildSummary({ session, log, events, audio, audioDropped });
   return {
     version: PAYLOAD_VERSION,
     testkitVersion,
@@ -48,7 +79,11 @@ export async function buildPayload({ session = {}, events = [], log = [], audio 
     session,
     events,
     log,
-    audio: await encodeAudio(audio),
-    summaryMarkdown: buildSummary({ session, log, events, audio }),
+    audio: encoded,
+    audioDropped,
+    audioOmitted: withoutAudio && audio.length > 0,
+    summaryMarkdown: withoutAudio && audio.length
+      ? `${summary}\n> Audio (${audio.length} segment${audio.length === 1 ? '' : 's'}) was left out of this file because it was too large to export.\n`
+      : summary,
   };
 }

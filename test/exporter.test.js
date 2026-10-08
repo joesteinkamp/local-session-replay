@@ -106,7 +106,7 @@ test('buildPayload matches the export contract', async () => {
   assert.equal(payload.session, session);
   assert.deepEqual(payload.audio, []);
   assert.match(payload.summaryMarkdown, /^# TestKit session: S/);
-  assert.deepEqual(Object.keys(payload).sort(), ['audio', 'events', 'exportedAt', 'log', 'session', 'summaryMarkdown', 'testkitVersion', 'version']);
+  assert.deepEqual(Object.keys(payload).sort(), ['audio', 'audioDropped', 'audioOmitted', 'events', 'exportedAt', 'log', 'session', 'summaryMarkdown', 'testkitVersion', 'version']);
 });
 
 const naive = (payload) => escapeJson(JSON.stringify(payload));

@@ -24,12 +24,14 @@
     "dev": "node scripts/build.mjs --watch",
     "serve": "node scripts/build.mjs && python3 -m http.server 8080 --bind 0.0.0.0 --directory public",
     "test": "node --test 'test/*.test.js'",
+    "test:browser": "node scripts/build.mjs && node test/browser/run.mjs",
     "prepare": "npm run build"
   },
   "license": "MIT",
   "devDependencies": {
     "rrweb": "2.1.7",
     "rrweb-player": "2.1.7",
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "playwright-core": "^1.64.0"
   }
 }

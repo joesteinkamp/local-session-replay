@@ -7,6 +7,9 @@
 
 const TIMESLICE_MS = 1000;
 const STOP_TIMEOUT_MS = 2000;
+// A locally stopped track (track.stop(), some OS-level revocations) never
+// fires 'ended', so the recorder's stream is also polled while recording.
+const WATCH_MS = 500;
 const MIME_PREFERENCE = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'];
 // Level meter maps RMS in dBFS onto 0..1: room noise ≈ 0–0.15, normal speech
 // (−35…−15 dBFS) ≈ 0.5–0.9.
@@ -75,8 +78,10 @@ function newId() {
  * @param {number} opts.bitrate                 audioBitsPerSecond
  * @param {(chunk) => void} opts.onChunk        { audioSegmentId, seq, ts, startTs, mime, blob }
  * @param {(kind, err?) => void} [opts.onProblem]  'ended' (track lost) | 'error' (recorder failed)
+ * @param {(kind) => void} [opts.onObserve]  'track-mute' | 'track-unmute' | 'device-change':
+ *   observational only (a muted track may just be another app holding the mic)
  */
-export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
+export function createAudioCapture({ bitrate, onChunk, onProblem = () => {}, onObserve = () => {} }) {
   let stream = null;
   let acquiring = null;
   let generation = 0; // bumped by release() so a late getUserMedia result is discarded
@@ -86,6 +91,8 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
   let ctx = null;
   let analyser = null;
   let samples = null;
+  let endedReported = false; // one 'ended' per stream, whichever signal sees it first
+  let watch = null;
 
   const tracks = () => (stream ? stream.getAudioTracks() : []);
   const isLive = () => tracks().some((t) => t.readyState === 'live');
@@ -107,12 +114,35 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     }
   }
 
+  function reportEnded() {
+    if (endedReported) return;
+    endedReported = true;
+    onProblem('ended');
+  }
+
+  const onDeviceChange = () => onObserve('device-change');
+
+  // A dead stream (device lost) is torn down before asking for a new one.
+  async function dropDeadStream() {
+    if (!stream || isLive()) return;
+    for (const t of stream.getTracks()) t.stop();
+    stream = null;
+    try {
+      await ctx?.close();
+    } catch {
+      // Already closed.
+    }
+    ctx = null;
+    analyser = null;
+  }
+
   /** Gets (or reuses) the mic stream. Rejects with the getUserMedia error. */
   function acquire() {
     if (isLive()) return Promise.resolve(stream);
     if (acquiring) return acquiring;
     const gen = generation;
     acquiring = (async () => {
+      await dropDeadStream();
       if (!navigator.mediaDevices?.getUserMedia) {
         throw Object.assign(new Error('Microphone capture is not supported in this browser'), { name: 'NotSupportedError' });
       }
@@ -123,10 +153,17 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
         throw Object.assign(new Error('Microphone request cancelled'), { name: 'AbortError' });
       }
       stream = s;
+      endedReported = false;
       for (const t of tracks()) {
         t.enabled = !muted;
-        t.addEventListener('ended', () => onProblem('ended'));
+        t.addEventListener('ended', () => {
+          if (stream === s) reportEnded();
+        });
+        t.addEventListener('mute', () => stream === s && onObserve('track-mute'));
+        t.addEventListener('unmute', () => stream === s && onObserve('track-unmute'));
       }
+      navigator.mediaDevices.removeEventListener?.('devicechange', onDeviceChange);
+      navigator.mediaDevices.addEventListener?.('devicechange', onDeviceChange);
       setupMeter();
       return stream;
     })().finally(() => {
@@ -147,8 +184,11 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     seg.stopped = new Promise((resolve) => {
       rec.addEventListener('stop', () => {
         if (recorder === rec) {
+          // Stopped without stopSegment(): the browser ended it (track lost).
           recorder = null;
           segment = null;
+          stopWatch();
+          reportEnded();
         }
         resolve();
       });
@@ -175,9 +215,23 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     });
     rec.addEventListener('error', (e) => onProblem('error', e.error || e));
     rec.start(TIMESLICE_MS);
+    endedReported = false;
     recorder = rec;
     segment = seg;
+    startWatch();
     return seg.audioSegmentId;
+  }
+
+  function startWatch() {
+    stopWatch();
+    watch = setInterval(() => {
+      if (recorder && !isLive()) reportEnded();
+    }, WATCH_MS);
+  }
+
+  function stopWatch() {
+    clearInterval(watch);
+    watch = null;
   }
 
   /** Stops the current segment; resolves after its final chunk was emitted. */
@@ -192,6 +246,7 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     }
     recorder = null;
     segment = null;
+    stopWatch();
     return Promise.race([seg.stopped, new Promise((r) => setTimeout(r, STOP_TIMEOUT_MS))]);
   }
 
@@ -229,6 +284,7 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     await stopSegment();
     for (const t of stream ? stream.getTracks() : []) t.stop();
     stream = null;
+    navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
     try {
       await ctx?.close();
     } catch {
@@ -248,5 +304,6 @@ export function createAudioCapture({ bitrate, onChunk, onProblem = () => {} }) {
     release,
     isLive,
     isRecording: () => !!recorder,
+    segmentId: () => segment?.audioSegmentId ?? null,
   };
 }

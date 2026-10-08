@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  audioGaps, buildSummary, buildTaskSpans, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
+  audioGaps, audioReport, buildSummary, buildTaskSpans, GAPS_MEANING, LOST_SEGMENT_REASON, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
   detectRageClicks, formatDuration, formatTrailLine, overlapMs, pausedSpans, shortUrl,
 } from '../src/export/summary.js';
 
@@ -400,4 +400,45 @@ test('buildSummary: per-task audio gap signal from coverage', () => {
   const log = [{ ts: at(1), type: 'task-start', taskId: 't' }, { ts: at(40), type: 'task-end', taskId: 't', completed: true }];
   const md = buildSummary({ session, log, audio: [{ startTs: at(0), endTs: at(20) }, { startTs: at(22), endTs: at(40) }] });
   assert.ok(md.includes('- Audio gap: 2.0s from 00:19'), md);
+});
+
+test('audioGaps: saved segments count even when an older record says enabled:false', () => {
+  const session = { audio: { enabled: false } };
+  const gaps = audioGaps({ session, audio: [{ startTs: at(0), endTs: at(20) }], start: at(0), end: at(30) });
+  assert.deepEqual(gaps.map((g) => [g.start, g.end]), [[at(20), at(30)]]);
+});
+
+test('audioReport: one verdict from persisted segments, pauses excluded, 500 ms threshold', () => {
+  const session = { startedAt: at(0), endedAt: at(30), audio: { enabled: true } };
+  const pausedLog = [{ ts: at(10), type: 'pause' }, { ts: at(15), type: 'resume' }];
+  const full = audioReport({ session, log: pausedLog, audio: [{ startTs: at(0), endTs: at(10) }, { startTs: at(15.4), endTs: at(30) }] });
+  assert.deepEqual([full.kind, full.label, full.gaps.length], ['recorded', 'Audio recorded', 0]);
+  const gappy = audioReport({ session, log: [], audio: [{ startTs: at(0), endTs: at(10) }, { startTs: at(12), endTs: at(30) }] });
+  assert.deepEqual([gappy.kind, gappy.label, gappy.gapMs], ['gaps', 'Audio recorded with gaps', 2000]);
+  const none = audioReport({ session, log: [], audio: [] });
+  assert.deepEqual([none.kind, none.label, none.gaps], ['none', 'No audio recorded', []]);
+});
+
+test('audioReport: denied on page 3 after audio on pages 1–2 is "with gaps", never "not recorded"', () => {
+  const session = { study: 's', startedAt: at(0), endedAt: at(90), audio: { enabled: false } }; // older record
+  const log = [{ ts: at(60), type: 'audio-gap', gapStart: at(60), gapMs: null, message: 'Microphone unavailable: Microphone access was denied' }];
+  const audio = [{ startTs: at(0), endTs: at(30) }, { startTs: at(30.3), endTs: at(60) }];
+  const report = audioReport({ session, log, audio });
+  assert.equal(report.label, 'Audio recorded with gaps');
+  assert.equal(report.gaps[0].reason, 'Microphone unavailable: Microphone access was denied');
+  const md = buildSummary({ session, log, audio });
+  assert.ok(md.includes(`- Audio saved: Audio recorded with gaps (${GAPS_MEANING})`), md);
+  assert.ok(!md.includes('not recorded'), md);
+});
+
+test('buildSummary: seq problems are surfaced; a dropped segment explains its gap', () => {
+  const session = { study: 's', startedAt: at(0), endedAt: at(30), audio: { enabled: true } };
+  const audio = [{ startTs: at(0), endTs: at(10), seqGaps: [3] }, { startTs: at(20), endTs: at(30) }];
+  const dropped = [{ startTs: at(10), endTs: at(20), reason: 'missing-first-chunk' }];
+  const md = buildSummary({ session, log: [], audio, audioDropped: dropped });
+  assert.ok(md.includes('- Unreliable audio segments: 1 (missing chunks; playback may stop early)'), md);
+  assert.ok(md.includes('- Lost audio segments: 1'), md);
+  assert.ok(md.includes(LOST_SEGMENT_REASON), md);
+  const none = buildSummary({ session, log: [], audio: [] });
+  assert.ok(none.includes('- Audio saved: No audio recorded'), none);
 });

@@ -67,26 +67,47 @@ export function sortLog(entries) {
 /**
  * Stitches audio chunks into one Blob per audio segment. A segment's startTs
  * is the MediaRecorder 'start' time; endTs is when its last chunk arrived.
+ *
+ * Chunks are written one transaction each, so one can go missing (aborted at
+ * unload, failed write). Without seq 0 (the container header) the rest is
+ * undecodable, so that segment is dropped and reported in `dropped`. A hole
+ * later on is kept and reported as `seqGaps` (missing seq numbers): the
+ * browsers tested play up to the hole, so trimming would only lose audio
+ * (see docs/audio-matrix.md).
  */
-export function groupAudioChunks(chunks) {
+export function groupAudioChunksReport(chunks) {
   const bySegment = new Map();
   for (const c of chunks) {
     if (!bySegment.has(c.audioSegmentId)) bySegment.set(c.audioSegmentId, []);
     bySegment.get(c.audioSegmentId).push(c);
   }
   const segments = [];
+  const dropped = [];
   for (const [audioSegmentId, list] of bySegment) {
     list.sort((a, b) => a.seq - b.seq);
     const mime = list[0].mime || 'audio/webm';
-    segments.push({
-      audioSegmentId,
-      startTs: list[0].startTs ?? list[0].ts,
-      endTs: Math.max(...list.map((c) => c.ts)),
-      mime,
-      blob: new Blob(list.map((c) => c.blob), { type: mime }),
-    });
+    const startTs = list[0].startTs ?? list[0].ts;
+    const endTs = Math.max(...list.map((c) => c.ts));
+    if (list[0].seq !== 0) {
+      dropped.push({ audioSegmentId, startTs, endTs, mime, chunks: list.length, reason: 'missing-first-chunk' });
+      continue;
+    }
+    const seqGaps = [];
+    for (let i = 1; i < list.length; i++) {
+      for (let s = list[i - 1].seq + 1; s < list[i].seq; s++) seqGaps.push(s);
+    }
+    const seg = { audioSegmentId, startTs, endTs, mime, blob: new Blob(list.map((c) => c.blob), { type: mime }) };
+    if (seqGaps.length) seg.seqGaps = seqGaps;
+    segments.push(seg);
   }
-  return segments.sort((a, b) => a.startTs - b.startTs);
+  return {
+    segments: segments.sort((a, b) => a.startTs - b.startTs),
+    dropped: dropped.sort((a, b) => a.startTs - b.startTs),
+  };
+}
+
+export function groupAudioChunks(chunks) {
+  return groupAudioChunksReport(chunks).segments;
 }
 
 /** Recording time excluding paused time, derived from a SessionRecord. */
@@ -467,12 +488,34 @@ export async function loadSessionData(id) {
     byIndex('audio'),
   ]);
   if (!session) throw new Error(`Unknown session ${id}`);
+  const { segments, dropped } = groupAudioChunksReport(audio);
   return {
     session,
     events: flattenEventChunks(eventChunks),
     log: sortLog(log),
-    audio: groupAudioChunks(audio),
+    audio: segments,
+    audioDropped: dropped,
   };
+}
+
+/**
+ * What the pre-download "saved audio" line needs, without the rrweb events:
+ * `{ session, log, audio, audioDropped }`, grouped exactly as loadSessionData()
+ * groups them so the overlay and the export agree.
+ */
+export async function loadAudioReport(id) {
+  await flush();
+  await ready();
+  const tx = db.transaction(['sessions', 'log', 'audio']);
+  const byIndex = (name) => requestToPromise(tx.objectStore(name).index('sessionId').getAll(IDBKeyRange.only(id)));
+  const [session, log, audio] = await Promise.all([
+    requestToPromise(tx.objectStore('sessions').get(id)),
+    byIndex('log'),
+    byIndex('audio'),
+  ]);
+  if (!session) throw new Error(`Unknown session ${id}`);
+  const { segments, dropped } = groupAudioChunksReport(audio);
+  return { session, log: sortLog(log), audio: segments, audioDropped: dropped };
 }
 
 export async function deleteSession(id) {

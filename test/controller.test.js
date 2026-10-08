@@ -34,17 +34,20 @@ Object.defineProperty(globalThis, 'navigator', {
 
 const { createController, STALE_MS } = await import('../src/core/session.js');
 const { normalizeConfig } = await import('../src/core/config.js');
+const { groupAudioChunks } = await import('../src/core/store.js');
 
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
 function memoryStore() {
   const sessions = new Map();
   const log = [];
+  const audio = [];
   const ls = new Map();
   const calls = [];
   let lastChunk = Promise.resolve(null);
   const store = {
-    sessions, log, ls, calls,
+    sessions, log, audio, ls, calls,
+    failAudio: null, // an Error makes appendAudio reject
     setLastChunk: (p) => (lastChunk = p),
     importSpill: async () => calls.push('importSpill'),
     getSession: async (id) => {
@@ -55,7 +58,16 @@ function memoryStore() {
     updateSession: async (id, patch) => Object.assign(sessions.get(id), structuredClone(patch)),
     appendEvents: async () => {},
     appendLog: async (id, entry) => log.push({ ...entry, sessionId: id }),
-    appendAudio: async () => {},
+    appendAudio: async (id, chunk) => {
+      if (store.failAudio) throw store.failAudio;
+      audio.push({ ...chunk, sessionId: id });
+    },
+    loadAudioReport: async (id) => ({
+      session: structuredClone(sessions.get(id)),
+      log: log.filter((e) => e.sessionId === id).map(({ sessionId, ...e }) => e),
+      audio: groupAudioChunks(audio.filter((c) => c.sessionId === id).map((c) => ({ ...c, blob: new Blob([]) }))),
+      audioDropped: [],
+    }),
     lastAudioChunk: () => lastChunk,
     flush: async () => {},
     spill: noop,
@@ -76,7 +88,7 @@ function memoryStore() {
 }
 
 function fakeDeps({ micError } = {}) {
-  const seen = { recorderConfigs: [], marks: [], acquires: 0, releases: 0, problem: null };
+  const seen = { recorderConfigs: [], marks: [], acquires: 0, releases: 0, problem: null, micError, segments: [], capture: null };
   const deps = {
     createRecorder: ({ config }) => {
       seen.recorderConfigs.push(config);
@@ -98,29 +110,50 @@ function fakeDeps({ micError } = {}) {
         log: (type, fields = {}) => onEntry({ ts: Date.now(), type, url: location.href, taskId: getTaskId(), ...fields }),
       };
     },
-    createAudioCapture: ({ onProblem }) => {
+    // Chunks are emitted by hand (seen.capture.emit()) so tests control when
+    // the first one is persisted.
+    createAudioCapture: ({ onProblem, onChunk, onObserve }) => {
       seen.problem = onProblem;
+      seen.observe = onObserve;
       let live = false;
-      let recording = false;
-      return {
+      let seg = null;
+      let n = 0;
+      let muted = false;
+      const capture = {
         acquire: async () => {
           seen.acquires++;
-          if (micError) throw micError;
+          if (seen.gate) await seen.gate;
+          if (seen.micError) throw seen.micError;
           live = true;
         },
-        startSegment: () => (recording = true),
-        stopSegment: async () => (recording = false),
+        startSegment: () => {
+          seg = { id: `aseg${++n}`, seq: 0, startTs: Date.now() };
+          seen.segments.push({ id: seg.id, mutedAtStart: muted });
+          return seg.id;
+        },
+        stopSegment: async () => {
+          seg = null;
+        },
+        emit: () => seg && onChunk({ audioSegmentId: seg.id, seq: seg.seq++, ts: Date.now(), startTs: seg.startTs, mime: 'audio/webm', blob: null }),
         requestData: noop,
-        setMuted: noop,
+        setMuted: (m) => {
+          muted = m;
+        },
         getLevel: () => 0,
         release: async () => {
           seen.releases++;
           live = false;
-          recording = false;
+          seg = null;
+        },
+        kill: () => {
+          live = false;
         },
         isLive: () => live,
-        isRecording: () => recording,
+        isRecording: () => !!seg,
+        segmentId: () => seg?.id ?? null,
       };
+      seen.capture = capture;
+      return capture;
     },
   };
   return { deps, seen };
@@ -131,8 +164,7 @@ const config = normalizeConfig({
   tasks: [{ id: 't1', prompt: 'One' }, { id: 't2', prompt: 'Two' }, { id: 't3', prompt: 'Three' }],
 });
 
-async function startSession({ audio = false } = {}) {
-  const store = memoryStore();
+async function startSession({ audio = false, store = memoryStore() } = {}) {
   const { deps, seen } = fakeDeps();
   const controller = await createController({ config, store, deps });
   await controller.beginPreflight();
@@ -269,23 +301,29 @@ for (const action of ['stop', 'discard']) {
   });
 }
 
-test('a dismissed prompt is retried on the next page; a real denial is not', async () => {
+test('a dismissed prompt is retried on the next page; a real denial sets stopAsking and keeps enabled', async () => {
   const denied = Object.assign(new Error('nope'), { name: 'NotAllowedError' });
-  for (const [permission, enabledAfter] of [['prompt', true], ['denied', false]]) {
+  for (const [permission, stopAsking] of [['prompt', false], ['denied', true]]) {
     permissions.state = permission;
     const store = memoryStore();
     seedRecording(store, { audio: { enabled: true, mime: 'audio/webm' } });
     const { deps } = fakeDeps({ micError: denied });
     const controller = await createController({ config, store, deps });
     await settle();
-    assert.equal(store.sessions.get('old').audio.enabled, enabledAfter, `permission ${permission}`);
+    const saved = store.sessions.get('old').audio;
+    assert.equal(saved.enabled, true, `permission ${permission}: intent is kept`);
+    assert.equal(!!saved.stopAsking, stopAsking, `permission ${permission}`);
     assert.equal(controller.getState().audio.status, 'denied');
+    assert.equal(controller.getState().audio.stopAsking, stopAsking);
     await controller.stop();
   }
+  permissions.state = 'prompt';
 });
 
 test('a bfcache restore into a session paused elsewhere releases the mic', async () => {
   const { store, seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
   assert.equal(controller.getState().audio.status, 'live');
   // Another page paused the session while this one sat in the bfcache.
   const rec = savedSession(store);
@@ -298,4 +336,242 @@ test('a bfcache restore into a session paused elsewhere releases the mic', async
   assert.ok(seen.releases >= 1, 'mic released');
   assert.notEqual(controller.getState().audio.status, 'live');
   await controller.stop();
+});
+
+// ---------------------------------------------------------------------------
+// Audio recovery and status (audio-recording-plan.md §0–§4)
+
+// A fresh page load of the same session: the previous page's controller is
+// stopped against a throwaway copy so its timers don't outlive the test.
+async function navigate(store, controller) {
+  const rec = structuredClone(savedSession(store));
+  const next = memoryStore();
+  next.sessions.set(rec.id, rec);
+  next.log.push(...store.log);
+  next.audio.push(...store.audio);
+  next.setActiveSessionId('study-a', rec.id, Date.now());
+  await controller.stop();
+  // Undo what stop() wrote to the old store; `next` holds the live session.
+  const { deps, seen } = fakeDeps();
+  const page = await createController({ config, store: next, deps });
+  await settle();
+  return { store: next, seen, controller: page };
+}
+
+test('status is live only after the first chunk of the active segment is saved', async () => {
+  const { seen, controller } = await startSession({ audio: true });
+  assert.equal(controller.getState().audio.status, 'pending');
+  seen.capture.emit();
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live');
+  await controller.pause();
+  assert.notEqual(controller.getState().audio.status, 'live', 'a stopped segment is not live');
+  await controller.resume();
+  assert.equal(controller.getState().audio.status, 'pending');
+  seen.capture.emit();
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live');
+  await controller.stop();
+});
+
+for (const [name, fail, expected] of [
+  ['device ended', ({ seen }) => seen.problem('ended'), 'Microphone disconnected'],
+  ['recorder error', ({ seen }) => seen.problem('error', new Error('boom')), 'Audio recording failed: boom'],
+  ['persistence failure', ({ seen, store }) => {
+    store.failAudio = new Error('disk said no');
+    seen.capture.emit();
+  }, 'Audio could not be saved: disk said no'],
+  ['IndexedDB quota', ({ seen, store }) => {
+    store.failAudio = Object.assign(new Error('quota'), { name: 'QuotaExceededError' });
+    seen.capture.emit();
+  }, 'Browser storage is full, so audio stopped saving. The screen is still recording; stop and download the session soon.'],
+]) {
+  test(`${name}: status leaves live, segment stops, visual capture continues, gap logged`, async () => {
+    const { store, seen, controller } = await startSession({ audio: true });
+    seen.capture.emit();
+    await settle();
+    assert.equal(controller.getState().audio.status, 'live');
+    await fail({ seen, store });
+    await settle();
+    const s = controller.getState();
+    assert.equal(s.audio.status, 'error');
+    assert.equal(s.audio.error, expected);
+    assert.equal(s.phase, 'recording', 'visual recording keeps going');
+    assert.equal(seen.capture.isRecording(), false, 'failed segment stopped');
+    const gap = store.log.find((e) => e.type === 'audio-gap');
+    assert.equal(gap?.message, expected);
+    await controller.stop();
+  });
+}
+
+test('a write failure of a segment that already stopped does not demote the new one', async () => {
+  const { store, seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
+  const first = store.appendAudio;
+  let rejectLate;
+  store.appendAudio = (id, chunk) => (chunk.audioSegmentId === 'aseg1' ? new Promise((_, r) => (rejectLate = r)) : first(id, chunk));
+  seen.capture.emit(); // aseg1 chunk still writing
+  await controller.pause();
+  await controller.resume(); // aseg2
+  seen.capture.emit();
+  await settle();
+  rejectLate(new Error('late'));
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live');
+  await controller.stop();
+});
+
+test('retryMic after the device ended starts a new segment and keeps saved audio', async () => {
+  const { store, seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
+  seen.capture.kill();
+  seen.problem('ended');
+  await settle();
+  const saved = store.audio.length;
+  const retry = controller.retryMic();
+  assert.equal(controller.getState().audio.status, 'reconnecting');
+  const res = await retry;
+  assert.deepEqual(res, { ok: true });
+  assert.equal(seen.segments.length, 2);
+  assert.equal(controller.getState().audio.status, 'reconnecting', 'not live until a chunk lands');
+  seen.capture.emit();
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live');
+  assert.equal(store.audio.length, saved + 1);
+  const gaps = store.log.filter((e) => e.type === 'audio-gap');
+  assert.equal(gaps.length, 2);
+  assert.equal(gaps[1].gapStart, gaps[0].gapStart, 'the retry closes the gap the failure opened');
+  assert.ok(gaps[1].gapMs >= 0);
+  await controller.stop();
+});
+
+test('retryMic denied: no segments cleared, stopAsking set, session continues without audio', async () => {
+  permissions.state = 'denied';
+  const { store, seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
+  seen.capture.kill();
+  seen.problem('ended');
+  seen.micError = Object.assign(new Error('no'), { name: 'NotAllowedError' });
+  const res = await controller.retryMic();
+  assert.equal(res.ok, false);
+  assert.equal(res.persistent, true);
+  const s = controller.getState();
+  assert.equal(s.audio.status, 'denied');
+  assert.equal(s.audio.stopAsking, true);
+  assert.equal(s.phase, 'recording');
+  assert.equal(savedSession(store).audio.enabled, true);
+  assert.equal(savedSession(store).audio.stopAsking, true);
+  assert.equal(store.audio.length, 1, 'saved audio untouched');
+  await controller.stop();
+  permissions.state = 'prompt';
+});
+
+test('Stop while a retry prompt is open releases the late grant', async () => {
+  const { seen, controller } = await startSession({ audio: true });
+  seen.capture.kill();
+  seen.problem('ended');
+  let grant;
+  seen.gate = new Promise((r) => (grant = r));
+  const retry = controller.retryMic();
+  await settle();
+  await controller.stop();
+  const releasesAtStop = seen.releases;
+  grant();
+  const res = await retry;
+  assert.equal(res.stale, true);
+  assert.notEqual(controller.getState().audio.status, 'live');
+  assert.ok(seen.releases >= releasesAtStop, 'released');
+  assert.equal(seen.capture.isLive(), false, 'no live microphone after Stop');
+});
+
+test('retryMic while paused re-acquires but leaves segment start to resume()', async () => {
+  const { seen, controller } = await startSession({ audio: true });
+  seen.capture.kill();
+  seen.problem('ended');
+  await controller.pause();
+  const res = await controller.retryMic();
+  assert.equal(res.ok, true);
+  assert.equal(seen.segments.length, 1, 'no segment while paused');
+  await controller.resume();
+  assert.equal(seen.segments.length, 2);
+  await controller.stop();
+});
+
+test('continueWithoutMic stops asking, releases the mic, and later pages do not prompt', async () => {
+  let { store, seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
+  await controller.continueWithoutMic();
+  assert.equal(controller.getState().audio.status, 'off');
+  assert.equal(controller.getState().audio.stopAsking, true);
+  assert.equal(seen.capture.isLive(), false);
+  assert.equal(store.audio.length, 1);
+  ({ store, seen, controller } = await navigate(store, controller));
+  assert.equal(seen.acquires, 0, 'no prompt on the next page');
+  assert.equal(controller.getState().audio.enabled, true);
+  // The tester can still change their mind: Retry asks again.
+  const res = await controller.retryMic();
+  assert.equal(res.ok, true);
+  assert.equal(savedSession(store).audio.stopAsking, false);
+  await controller.stop();
+});
+
+test('mute survives navigation and is applied before the new segment starts', async () => {
+  let { store, seen, controller } = await startSession({ audio: true });
+  await controller.toggleMute();
+  assert.equal(controller.getState().audio.status, 'muted');
+  ({ store, seen, controller } = await navigate(store, controller));
+  const s = controller.getState();
+  assert.equal(s.muted, true);
+  assert.equal(s.audio.status, 'muted');
+  assert.deepEqual(seen.segments.map((x) => x.mutedAtStart), [true]);
+  await controller.toggleMute();
+  assert.equal(controller.getState().audio.status, 'pending', 'unmuted but nothing saved yet');
+  seen.capture.emit();
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live');
+  await controller.stop();
+});
+
+test('pause survives navigation: no segment, mic not requested until resume', async () => {
+  let { store, seen, controller } = await startSession({ audio: true });
+  await controller.pause();
+  ({ store, seen, controller } = await navigate(store, controller));
+  assert.equal(controller.getState().phase, 'paused');
+  assert.equal(seen.acquires, 0);
+  assert.equal(seen.segments.length, 0);
+  await controller.resume();
+  assert.equal(seen.acquires, 1);
+  assert.equal(seen.segments.length, 1);
+  const gap = store.log.filter((e) => e.type === 'audio-gap').at(-1);
+  assert.equal(gap.message, undefined, 'a successful resume logs the gap without a failure reason');
+  await controller.stop();
+});
+
+test('older records: enabled:false without stopAsking never prompts again', async () => {
+  const store = memoryStore();
+  seedRecording(store, { audio: { enabled: false, mime: 'audio/webm' } });
+  const { deps, seen } = fakeDeps();
+  const controller = await createController({ config, store, deps });
+  await settle();
+  assert.equal(seen.acquires, 0);
+  assert.equal(controller.getState().audio.stopAsking, true);
+  await controller.stop();
+});
+
+test('stopped state carries the saved-audio verdict from persisted segments', async () => {
+  const { seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
+  await controller.stop();
+  assert.equal(controller.getState().savedAudio.segments, 1);
+  assert.match(controller.getState().savedAudio.label, /^Audio recorded/);
+
+  const none = await startSession({ audio: false });
+  await none.controller.stop();
+  assert.equal(none.controller.getState().savedAudio.kind, 'none');
+  assert.equal(none.controller.getState().savedAudio.label, 'No audio recorded');
 });

@@ -4,7 +4,7 @@ import rrwebPlayer from 'rrweb-player';
 import RRWEB_CSS from 'rrweb-player/dist/style.css';
 import PLAYER_CSS from './player.css';
 import {
-  audioGaps, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
+  GAPS_MEANING, audioReport, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
 } from '../export/summary.js';
 import { buildFilename } from '../export/html.js';
 import { findRemoteAssets } from './assets.js';
@@ -69,6 +69,7 @@ function readPayload() {
     events: Array.isArray(payload.events) ? payload.events : [],
     log: Array.isArray(payload.log) ? payload.log : [],
     audio: Array.isArray(payload.audio) ? payload.audio : [],
+    audioDropped: Array.isArray(payload.audioDropped) ? payload.audioDropped : [],
   };
 }
 
@@ -140,7 +141,7 @@ function createAudioSync(segments, { onStatus }) {
       status('gap', 'No audio at this point (gap between recordings)');
       return;
     }
-    const label = `segment ${it.index + 1} of ${items.length}`;
+    const label = `segment ${it.index + 1} of ${items.length}${it.seg.seqGaps?.length ? ', missing chunks' : ''}`;
     if (it.failed) {
       status(`fail-${it.index}`, `Audio ${label} can't be played in this browser (${it.seg.mime || 'unknown format'})`, true);
       return;
@@ -387,7 +388,7 @@ function mount() {
   const { session, events, log, audio } = data;
   const meta = session.meta || {};
   const tasks = session.tasks || session.config?.tasks || [];
-  const summary = data.summaryMarkdown || buildSummary({ session, log, events, audio });
+  const summary = data.summaryMarkdown || buildSummary({ session, log, events, audio, audioDropped: data.audioDropped });
   const replayable = events.length >= 2 && events.some((e) => e.type === RRWEB_FULL_SNAPSHOT);
   const t0 = replayable ? events[0].timestamp : session.startedAt;
   const t1 = replayable ? events[events.length - 1].timestamp : session.endedAt ?? t0;
@@ -401,7 +402,10 @@ function mount() {
     return { ...span, n, prompt, label: `Task ${n}: ${prompt}`, short: `${n}. ${prompt}` };
   });
   const errors = log.filter((e) => e.type === 'error' || e.type === 'rejection');
-  const gaps = audioGaps({ session, log, audio, start: sessionStart, end: sessionEnd, pauses });
+  // Same verdict and gap list as the summary and the overlay's pre-download line.
+  const saved = audioReport({ session, log, events, audio, dropped: data.audioDropped });
+  const { gaps } = saved;
+  const savedText = data.audioOmitted ? `${saved.label} (left out of this file: too large to export)` : saved.label;
 
   // ---- header ----
   const toast = createToast();
@@ -448,6 +452,7 @@ function mount() {
         metaItem('Started', formatLocal(sessionStart)),
         metaItem('Duration', durationText),
         metaItem('Tasks', `${spans.filter((s) => s.completed).length} of ${tasks.length || spans.length} completed`),
+        metaItem('Audio', h('span', { title: saved.kind === 'gaps' ? GAPS_MEANING : null }, savedText)),
         metaItem('Browser', describeBrowser(meta.userAgent)),
         metaItem('Viewport', meta.viewport ? `${meta.viewport.w} × ${meta.viewport.h}` : 'unknown'),
         metaItem('Commit', meta.commitSha ? h('code', {}, meta.commitSha) : 'unknown'),
@@ -635,7 +640,7 @@ function mount() {
       enableBtn.hidden = true;
     });
   } else {
-    audioStatus.textContent = session.audio?.enabled === false ? 'Not recorded for this session' : 'No audio in this export';
+    audioStatus.textContent = data.audioOmitted ? 'Audio was left out of this file (too large to export)' : saved.label;
   }
   skipBox.addEventListener('change', () => { skipPauses = skipBox.checked; });
 
