@@ -54,13 +54,18 @@ Open the app with `?test=1`. Props are the [config](#config-reference). The
 component renders nothing itself; the overlay lives in its own Shadow DOM.
 React 18 and 19 are supported. `examples/react/` is a working Vite app.
 
-- **Mount it first**, before the prototype. It reads `?test=1` in a
-  `useEffect`, and React runs that before the `useEffect`s of later siblings
-  (and their children) and of its parents, so an effect-based redirect there
-  can't strip the query string first. Redirects that run earlier still can:
-  `useLayoutEffect`, during render, router loaders, or on the server. Keep the
-  `test` param in those redirects. Once a session is in progress it survives
-  navigation without the param.
+- **Redirects that drop `?test=1`.** The package snapshots the `test` param
+  when it's first imported, so a client-side redirect that strips it before
+  `<TestKit />` mounts (a router `beforeLoad` or loader, `useLayoutEffect`, a
+  redirect during render) still activates, however much later the component
+  mounts on that page load. Import it in your entry module chunk if the
+  redirect happens before the component's chunk loads: if the package is only
+  imported from a lazily loaded chunk that evaluates after the redirect, the
+  snapshot misses the param. Import a binding you use; a bare
+  `import 'local-session-replay/react'` is dropped by bundlers, because the
+  package is marked side-effect-free. Server-side redirects still have to keep
+  the param. `?test=0`, at first import or in the current URL, always wins.
+  Once a session is in progress it survives navigation without the param.
 - **Configuration is read once.** The first committed `<TestKit />` on the page
   owns the configuration, even when it decides not to activate. Later prop
   changes, remounts (StrictMode, HMR), and other copies are ignored. Reload the
@@ -141,7 +146,7 @@ mixed, the first one to run wins.
 | Option | Default | Notes |
 | :-- | :-- | :-- |
 | `study` | `'untitled-study'` | Used in the export filename and header. |
-| `activate` | `'query'` | `'query'` = show with `?test=1`; `true`/`false`; or a function returning a boolean. Evaluated once, at the first mount or `init()`. `?test=0` always disables. An in-progress session stays active across navigation without the query param. Not an access control. |
+| `activate` | `'query'` | `'query'` = show with `?test=1`; `true`/`false`; or a function returning a boolean. Evaluated once, at the first mount or `init()`; in query mode, a `?test=1` present when the package was first imported still counts after a client-side redirect drops it. `?test=0` always disables. An in-progress session stays active across navigation without the query param. Not an access control. |
 | `audio` | `{ enabled: true, bitrate: 32000 }` | `audio: false` disables the mic entirely. ~15 MB/hour at 32 kbps. |
 | `mask` | `{ inputs: true }` | Masks typed values in the replay and the interaction log. |
 | `checkoutEveryNms` | `60000` | Periodic full DOM snapshots, so seeking stays fast. |

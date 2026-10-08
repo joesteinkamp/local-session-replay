@@ -54,3 +54,56 @@ test('loader fetches testkit-core.js from config.baseUrl when given', async () =
   window.TestKit.init({ activate: true, baseUrl: 'https://other.example/' });
   assert.equal(appended.length, 1, 'only the first init() counts');
 });
+
+// A fresh module instance, evaluated while the URL reads `search` (as on the
+// page load where the package is first imported).
+let instance = 0;
+async function importedAt(search) {
+  location.search = search;
+  return import(`../src/activation.js?instance=${++instance}`);
+}
+
+test('?test=1 seen at first import survives a router redirect that drops it', async () => {
+  const mod = await importedAt('?test=1');
+  location.search = ''; // beforeLoad redirect: /?test=1 → /signal-report
+  assert.equal(mod.isActivated({}), true);
+  location.search = '?tab=2'; // SPA navigates on; TestKit mounts much later
+  assert.equal(mod.isActivated({}), true, 'one page load = one claim');
+});
+
+test('without ?test=1 at first import, a later bare URL stays inactive', async () => {
+  const mod = await importedAt('');
+  location.search = '';
+  assert.equal(mod.isActivated({}), false);
+  location.search = '?test=1';
+  assert.equal(mod.isActivated({}), true, 'the live URL still counts');
+});
+
+test('an explicit ?test=0, in the snapshot or the live URL, wins', async () => {
+  const offAtImport = await importedAt('?test=0');
+  location.search = '?test=1';
+  assert.equal(offAtImport.isActivated({}), false);
+  assert.equal(offAtImport.isActivated({ activate: true }), false);
+  const onAtImport = await importedAt('?test=1');
+  location.search = '?test=0';
+  assert.equal(onAtImport.isActivated({}), false);
+});
+
+test('the snapshot only feeds query mode', async () => {
+  const mod = await importedAt('?test=1');
+  location.search = '';
+  assert.equal(mod.isActivated({ activate: false }), false);
+  assert.equal(mod.isActivated({ activate: () => false }), false);
+});
+
+test('module evaluation is SSR-safe (no window, no location)', async () => {
+  const saved = { window: globalThis.window, location: globalThis.location };
+  delete globalThis.window;
+  delete globalThis.location;
+  try {
+    const mod = await import(`../src/activation.js?ssr=${++instance}`);
+    assert.equal(typeof mod.isActivated, 'function');
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+});
