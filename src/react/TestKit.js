@@ -8,11 +8,16 @@
 import { useEffect } from 'react';
 import { boot } from '../boot.js';
 
-export function TestKit(props) {
-  useEffect(() => {
-    // A failed chunk import (e.g. after a redeploy) must not surface as an
-    // unhandled rejection. The claim stays taken: fix the cause and reload.
-    boot(props).catch((err) => console.error('[TestKit] failed to start', err));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- mount-once by design
-  return null;
+/** Internal (not re-exported by the entry): tests inject a fake boot. */
+export function createTestKit(bootFn) {
+  return function TestKit(props) {
+    useEffect(() => {
+      // A failed chunk import (e.g. after a redeploy) must not surface as an
+      // unhandled rejection. The claim stays taken: fix the cause and reload.
+      bootFn(props).catch((err) => console.error('[TestKit] failed to start', err));
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps -- mount-once by design
+    return null;
+  };
 }
+
+export const TestKit = createTestKit(boot);
