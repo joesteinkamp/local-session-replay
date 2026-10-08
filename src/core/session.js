@@ -452,7 +452,7 @@ export async function createController({ config, store, deps = {} }) {
       const { status, error, persistent } = await classifyMicError(err);
       if (!isCurrent()) return { ok: false, stale: true };
       setAudio({ status, error });
-      return { ok: false, error: error || messageOf(err), persistent };
+      return { ok: false, status, error: error || messageOf(err), persistent };
     }
   }
 
@@ -484,24 +484,43 @@ export async function createController({ config, store, deps = {} }) {
    * (dropping the result if the lifecycle moved on), starts a new segment
    * when recording and logs the gap; the gap itself is derived from segment
    * coverage, the log entry only supplies the reason. A denial never touches
-   * saved segments; a confirmed one sets stopAsking so no page asks again.
+   * saved segments, but sets stopAsking so no later page asks again.
+   *
+   * Callers outside the serial queue (Retry, the post-navigation restart)
+   * pass `inQueue: false`: the grant can land while pause() is mid-way, so
+   * the segment start is queued behind it and re-checks the phase there.
    */
-  async function reconnectAudio({ gapStart, isCurrent, waiting }) {
+  async function reconnectAudio({ gapStart, isCurrent, waiting, inQueue }) {
     await stopAudioSegment();
     if (!isCurrent()) return { ok: false, stale: true };
     const res = await acquireMic(isCurrent, { waiting });
     if (!isCurrent() || res.stale) return { ok: false, stale: true };
     if (!res.ok) {
-      if (res.persistent) persist({ audio: { ...audioFields(session.audio), stopAsking: true } });
-      set({ audio: { ...state.audio, stopAsking: !!res.persistent || state.audio.stopAsking } });
+      const stop = deniedInSession(res);
+      if (stop) persist({ audio: { ...audioFields(session.audio), stopAsking: true } });
+      set({ audio: { ...state.audio, stopAsking: stop || state.audio.stopAsking } });
       failedAt ??= gapStart;
       log('audio-gap', { gapStart, gapMs: null, message: `Microphone unavailable: ${res.error}` });
-      return res;
+      return { ...res, persistent: stop };
     }
-    if (state.phase !== 'recording') return { ok: true }; // resume() starts the segment
-    if (startAudioSegment({ waiting })) log('audio-gap', { gapStart, gapMs: Math.max(0, Date.now() - gapStart) });
-    return { ok: true };
+    const begin = () => {
+      if (!isCurrent()) return { ok: false, stale: true };
+      if (state.phase !== 'recording') {
+        // Paused: resume() starts the segment. Not 'live' and no longer reconnecting.
+        if (state.audio.status === 'reconnecting') setAudio({ status: state.muted ? 'muted' : 'pending' });
+        return { ok: true };
+      }
+      if (startAudioSegment({ waiting })) log('audio-gap', { gapStart, gapMs: Math.max(0, Date.now() - gapStart) });
+      return { ok: true };
+    };
+    return inQueue ? begin() : queue(begin);
   }
+
+  // Inside a session any NotAllowedError stops the asking, whatever the
+  // Permissions API says: Firefox and Safari don't remember a one-off "Block"
+  // (state stays 'prompt'), so otherwise every navigation would re-prompt.
+  // Retry clears it when the tester asks.
+  const deniedInSession = (res) => !!res.persistent || res.status === 'denied';
 
   // After a navigation the previous page's recorder is gone. Re-acquire the
   // mic without blocking boot (Safari may re-prompt) and log the silence.
@@ -517,7 +536,7 @@ export async function createController({ config, store, deps = {} }) {
     // the gap runs from the previous page's start, else the session start.
     const segments = session.segments || [];
     const gapStart = last?.ts ?? segments[segments.length - 2]?.startedAt ?? session.startedAt;
-    await reconnectAudio({ gapStart, isCurrent, waiting: 'pending' });
+    await reconnectAudio({ gapStart, isCurrent, waiting: 'pending', inQueue: false });
   }
 
   // A later page of a session that stopped asking after a denial: say
@@ -822,7 +841,7 @@ export async function createController({ config, store, deps = {} }) {
         }
         const consentAt = Date.now();
         const useAudio = config.audio.enabled && wantAudio !== false;
-        if (useAudio && !audio?.isLive()) await acquireMic(() => state.phase === 'preflight');
+        const startMic = useAudio && !audio?.isLive() ? await acquireMic(() => state.phase === 'preflight') : null;
         if (!useAudio) {
           await releaseAudio();
           setAudio({ enabled: false, status: 'off', error: null });
@@ -852,7 +871,7 @@ export async function createController({ config, store, deps = {} }) {
           },
           segments: [{ segmentId, url: location.href, startedAt: now }],
           // enabled = the tester chose voice; stopAsking = never prompt again.
-          audio: { enabled: useAudio, mime: audioOk ? pickMimeType() || null : null, stopAsking: false },
+          audio: { enabled: useAudio, mime: audioOk ? pickMimeType() || null : null, stopAsking: !!startMic && !startMic.ok && deniedInSession(startMic) },
           muted: false,
           pausedMs: 0,
           pausedAt: null,
@@ -869,7 +888,7 @@ export async function createController({ config, store, deps = {} }) {
           ...stateFromSession('recording'),
           // enabled reflects intent, so a denied mic is shown as denied rather than off.
           audio: useAudio
-            ? { enabled: true, stopAsking: false, status: audioOk ? 'pending' : state.audio.status, error: audioOk ? null : state.audio.error }
+            ? { enabled: true, stopAsking: session.audio.stopAsking, status: audioOk ? 'pending' : state.audio.status, error: audioOk ? null : state.audio.error }
             : { enabled: false, stopAsking: false, status: 'off', error: null },
         };
         startCapture();
@@ -936,7 +955,7 @@ export async function createController({ config, store, deps = {} }) {
           const gen = generation;
           const isCurrent = () => gen === generation && state.phase === 'recording';
           if (audio?.isLive()) startAudioSegment();
-          else await reconnectAudio({ gapStart: now, isCurrent, waiting: 'pending' });
+          else await reconnectAudio({ gapStart: now, isCurrent, waiting: 'pending', inQueue: true });
         }
       });
     },
@@ -988,7 +1007,7 @@ export async function createController({ config, store, deps = {} }) {
         await stopAudioSegment();
         await releaseAudio();
         if (!isCurrent()) return { ok: false, stale: true };
-        return reconnectAudio({ gapStart, isCurrent, waiting: 'reconnecting' });
+        return reconnectAudio({ gapStart, isCurrent, waiting: 'reconnecting', inQueue: false });
       })()
         .catch((err) => {
           reportError(err);

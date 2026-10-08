@@ -106,7 +106,7 @@ test('buildPayload matches the export contract', async () => {
   assert.equal(payload.session, session);
   assert.deepEqual(payload.audio, []);
   assert.match(payload.summaryMarkdown, /^# TestKit session: S/);
-  assert.deepEqual(Object.keys(payload).sort(), ['audio', 'audioDropped', 'audioOmitted', 'events', 'exportedAt', 'log', 'session', 'summaryMarkdown', 'testkitVersion', 'version']);
+  assert.deepEqual(Object.keys(payload).sort(), ['audio', 'audioDropped', 'audioOmitted', 'events', 'exportedAt', 'log', 'omittedAudio', 'session', 'summaryMarkdown', 'testkitVersion', 'version']);
 });
 
 const naive = (payload) => escapeJson(JSON.stringify(payload));
@@ -183,6 +183,7 @@ test('buildPayload: audio that cannot be encoded raises AudioExportError; withou
   const visual = await buildPayload(data, { withoutAudio: true });
   assert.deepEqual(visual.audio, []);
   assert.equal(visual.audioOmitted, true);
+  assert.deepEqual(visual.omittedAudio, [{ audioSegmentId: 'a', startTs: 0, endTs: 10_000, mime: 'audio/webm' }], 'metadata kept for the player');
   assert.match(visual.summaryMarkdown, /- Audio saved: Audio recorded\n/);
   assert.match(visual.summaryMarkdown, /left out of this file/);
 });

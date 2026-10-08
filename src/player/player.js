@@ -75,6 +75,7 @@ function readPayload() {
     log: Array.isArray(payload.log) ? payload.log : [],
     audio: Array.isArray(payload.audio) ? payload.audio : [],
     audioDropped: Array.isArray(payload.audioDropped) ? payload.audioDropped : [],
+    omittedAudio: Array.isArray(payload.omittedAudio) ? payload.omittedAudio : [],
   };
 }
 
@@ -401,7 +402,10 @@ function mount() {
   const { session, events, log, audio } = data;
   const meta = session.meta || {};
   const tasks = session.tasks || session.config?.tasks || [];
-  const summary = data.summaryMarkdown || buildSummary({ session, log, events, audio, audioDropped: data.audioDropped });
+  // A without-audio export keeps the saved segments' metadata: verdict and
+  // gap marks describe what was recorded, not what this file carries.
+  const savedSegments = data.audioOmitted ? data.omittedAudio : audio;
+  const summary = data.summaryMarkdown || buildSummary({ session, log, events, audio: savedSegments, audioDropped: data.audioDropped });
   const replayable = events.length >= 2 && events.some((e) => e.type === RRWEB_FULL_SNAPSHOT);
   const t0 = replayable ? events[0].timestamp : session.startedAt;
   const t1 = replayable ? events[events.length - 1].timestamp : session.endedAt ?? t0;
@@ -416,9 +420,9 @@ function mount() {
   });
   const errors = log.filter((e) => e.type === 'error' || e.type === 'rejection');
   // Same verdict and gap list as the summary and the overlay's pre-download line.
-  const saved = audioReport({ session, log, events, audio, dropped: data.audioDropped });
+  const saved = audioReport({ session, log, events, audio: savedSegments, dropped: data.audioDropped });
   const { gaps } = saved;
-  const savedText = data.audioOmitted ? `${saved.label} (left out of this file: too large to export)` : saved.label;
+  const savedText = data.audioOmitted ? `${saved.label} — left out of this file (too large to export)` : saved.label;
 
   // ---- header ----
   const toast = createToast();

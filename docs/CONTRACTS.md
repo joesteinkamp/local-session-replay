@@ -219,8 +219,11 @@ overlay requests below.
 `state.audio.enabled` reflects the tester's choice, so a denied mic shows as
 `{ enabled: true, status: 'denied' }`. A *dismissed* prompt (Permissions API
 reports `prompt` after `NotAllowedError`) shows as `denied` with error
-'Microphone prompt was dismissed' and is retried on the next page; only a
-confirmed `denied` permission sets `stopAsking`, so the session stops asking.
+'Microphone prompt was dismissed'. Inside a session (including Start) **any**
+`NotAllowedError` sets `stopAsking`, whatever the Permissions API says: Firefox
+and Safari don't remember a one-off "Block", so otherwise every navigation would
+re-prompt. The tester re-opens it with Retry. (This replaces the earlier
+"retry a dismissed prompt on the next page" rule.)
 
 On boot, if `localStorage['testkit:active:<study>']` names a session of this study in
 `recording`/`paused`, the controller resumes it automatically (new segment,
@@ -275,10 +278,14 @@ locally stopped track never fires `ended`); `onProblem('error', err)` on recorde
    `retryMic()`, `resume()` after a released stream, and the restart after a
    navigation: await the failed segment's `stopSegment()`, acquire with a
    `generation` staleness check (a stale grant is released), start a segment if
-   recording (paused: `resume()` starts it), and log `audio-gap` — `gapMs` on
+   recording (paused: `resume()` starts it; status leaves `reconnecting` for
+   `pending`/`muted`), and log `audio-gap` — `gapMs` on
    success, `null` + `message` on failure. The gap shown to people comes from
    segment coverage; the log entry only supplies the reason. A denial never
-   touches saved segments; a confirmed one sets `stopAsking`. `retryMic()` always
+   touches saved segments; any `NotAllowedError` sets `stopAsking`. Callers
+   outside the serial queue (Retry, the post-navigation restart) queue the
+   post-acquire segment start, so a grant that lands while `pause()` is
+   persisting can't start a segment that runs through the pause. `retryMic()` always
    releases the current stream first (after a `devicechange` the old one is
    still live but bound to the previous device), is not
    queued (the prompt can stay open; Stop/Discard bump `generation` and win),
@@ -321,7 +328,9 @@ string; callers pass the Blob to the download (`URL.createObjectURL(blob)` +
 text — see build), and a `<script type="application/json" id="testkit-data">`
 payload (every `<` escaped as `\u003c`, plus U+2028/2029) holding `{ version: 1,
 testkitVersion, exportedAt, session, events, log, audio: [{ audioSegmentId,
-startTs, endTs, mime, seqGaps?, dataUrl }], audioDropped, audioOmitted, summaryMarkdown }`. Filename:
+startTs, endTs, mime, seqGaps?, dataUrl }], audioDropped, audioOmitted, omittedAudio, summaryMarkdown }`
+(`omittedAudio` = segment metadata without data in a without-audio export, so the
+player shows the same verdict and gap marks as the summary). Filename:
 `testkit-<study>-<YYYYMMDD-HHmm>.html` (local time of `startedAt`).
 
 The file's CSP is default-deny (`default-src 'none'`; inline script/style;

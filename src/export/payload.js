@@ -82,6 +82,9 @@ export async function buildPayload(
     audio: encoded,
     audioDropped,
     audioOmitted: withoutAudio && audio.length > 0,
+    // What was saved but left out (no data), so the player reports the same
+    // verdict and gaps as the summary.
+    omittedAudio: withoutAudio ? audio.map(({ audioSegmentId, startTs, endTs, mime, seqGaps }) => ({ audioSegmentId, startTs, endTs, mime: mime || null, ...(seqGaps?.length ? { seqGaps } : {}) })) : [],
     summaryMarkdown: withoutAudio && audio.length
       ? `${summary}\n> Audio (${audio.length} segment${audio.length === 1 ? '' : 's'}) was left out of this file because it was too large to export.\n`
       : summary,

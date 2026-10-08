@@ -200,8 +200,43 @@ async function startWithMic(page, { url = `${DEMO}/index.html?test=1` } = {}) {
   await page.locator('.tk-notice.is-ok', { hasText: 'We can hear you' }).waitFor({ timeout: 15_000 });
 }
 
+// Records every (time, phase, audio status) the controller emits on this page.
+const traceStatus = (page) =>
+  page.evaluate(() => {
+    window.__trace = [];
+    window.__traceStart = Date.now();
+    window.TestKit.controller.subscribe((s) => window.__trace.push([Date.now(), s.phase, s.audio.status]));
+  });
+
+// "live" must never be shown before the active segment has a saved chunk:
+// the first recording-phase 'live' since the trace began comes after the
+// earliest chunk saved since then (i.e. of the segment that action started).
+async function assertLiveAfterFirstChunk(page, label) {
+  const { firstLive, chunks } = await page.evaluate(async () => {
+    const live = window.__trace.find(([, phase, status]) => phase === 'recording' && status === 'live');
+    const since = window.__traceStart;
+    const id = window.TestKit.controller.getState().sessionId;
+    const db = await new Promise((res) => {
+      const q = indexedDB.open('testkit');
+      q.onsuccess = () => res(q.result);
+    });
+    const rows = await new Promise((res) => {
+      const q = db.transaction('audio').objectStore('audio').index('sessionId').getAll(IDBKeyRange.only(id));
+      q.onsuccess = () => res(q.result.map(({ audioSegmentId, seq, ts }) => ({ audioSegmentId, seq, ts })));
+    });
+    db.close();
+    // Only chunks saved after the action (Start / Retry) belong to its segment.
+    return { firstLive: live?.[0] ?? null, chunks: rows.filter((c) => c.ts >= since) };
+  });
+  assert.ok(firstLive, `${label}: went live`);
+  const before = chunks.filter((c) => c.ts <= firstLive);
+  assert.ok(before.length > 0, `${label}: 'live' at ${firstLive} before any chunk was saved (${JSON.stringify(chunks.slice(0, 3))})`);
+  return { msFirstChunkToLive: firstLive - Math.min(...before.map((c) => c.ts)) };
+}
+
 // Preflight's level check also reports 'live', so wait for the session first.
 async function beginRecording(page) {
+  await traceStatus(page);
   await fid(page, 'start-session').click();
   await waitPhase(page, 'recording');
   await waitAudio(page, 'live');
@@ -346,11 +381,13 @@ scenarios.A = async (browser) => {
   await startWithMic(page);
   r.continueWithoutAudioAfterPass = await fid(page, 'skip-audio').isVisible();
   assert.ok(r.continueWithoutAudioAfterPass, 'Continue without audio stays after a passed check');
+  await traceStatus(page);
   await fid(page, 'start-session').click();
   await waitPhase(page, 'recording');
   const t = Date.now();
   await waitAudio(page, 'live');
   r.msToLive = Date.now() - t;
+  r.liveAfterChunk = await assertLiveAfterFirstChunk(page, 'A start');
 
   await sleep(3000);
   await fid(page, 'mute').click();
@@ -405,9 +442,13 @@ scenarios.A = async (browser) => {
   await openPanel(page);
   r.stoppedNotice = await page.locator('.tk-notice.is-error').first().textContent();
   const retryAt = Date.now();
+  await traceStatus(page);
   await fid(page, 'mic-retry').click();
   await waitAudio(page, 'live');
   r.msRetryToLive = Date.now() - retryAt;
+  r.retryTrace = await page.evaluate(() => window.__trace.map(([, , s]) => s).filter((s, i, a) => s !== a[i - 1]));
+  assert.deepEqual(r.retryTrace.slice(-2), ['reconnecting', 'live'], `retry status sequence ${r.retryTrace}`);
+  r.retryLiveAfterChunk = await assertLiveAfterFirstChunk(page, 'A retry');
   await sleep(3000);
 
   const raw = await idbAudio(page);
@@ -437,6 +478,14 @@ scenarios.A = async (browser) => {
   assert.equal(r.announcedCollapsed, 'Audio stopped — screen is still recording.');
   assert.ok(r.muteSurvivedNavigation);
   assert.ok(r.pausedBadgeNotLive);
+
+  // Visual-only fallback: the player must still report what was saved.
+  const [visualDl] = await Promise.all([
+    page.waitForEvent('download'),
+    page.evaluate(() => window.TestKit.controller.exportSession({ withoutAudio: true })),
+  ]);
+  const visualFile = path.join(outDir, 'A-without-audio.html');
+  await visualDl.saveAs(visualFile);
 
   // Offline player: decode, alignment, 8×, seek across a boundary and a gap.
   const offline = await browser.newContext({ offline: true });
@@ -485,6 +534,16 @@ scenarios.A = async (browser) => {
   assert.match(r.seekAcross.after, /Playing segment/);
   assert.equal(r.fast.anyPlayingAt8, false, 'audio paused above 4×');
   assert.ok(r.fast.inside && r.fast.playingAfter && Math.abs(r.fast.resyncDriftMs) <= SYNC_BUDGET_MS, `8× → 1× resync ${JSON.stringify(r.fast)}`);
+  const visual = await openPlayer(offline, visualFile);
+  r.withoutAudio = await visual.evaluate(() => ({
+    header: [...document.querySelectorAll('.tk-meta div')].find((d) => d.querySelector('dt')?.textContent === 'Audio')?.querySelector('dd').textContent,
+    gapMarks: document.querySelectorAll('.tk-gap').length,
+    status: document.querySelector('.tk-audio-status')?.textContent,
+    elements: document.querySelectorAll('audio').length,
+  }));
+  assert.equal(r.withoutAudio.header, `${report.label} — left out of this file (too large to export)`);
+  assert.equal(r.withoutAudio.gapMarks, report.gaps.length, 'gap marks kept');
+  assert.equal(r.withoutAudio.elements, 0);
   await offline.close();
   await context.close();
   return r;
@@ -517,6 +576,7 @@ scenarios.B = async (browser) => {
   const page = await context.newPage();
   await startWithMic(page);
   await beginRecording(page);
+  r.liveAfterChunk = await assertLiveAfterFirstChunk(page, 'B start');
   await sleep(3000);
   await page.locator('header a[href="about.html"]').click();
   await page.waitForURL(/about\.html/);
@@ -845,8 +905,82 @@ scenarios.F = async (browser) => {
     };
   });
   await context.close();
+  // What the policy rests on (Chrome): a hole keeps timing and plays through;
+  // no seq 0 is undecodable.
+  assert.equal(r.full.played.ended, true);
+  assert.equal(r.missingMiddle.element, 'ok');
+  assert.equal(r.missingMiddle.played.error, null, 'missing middle chunk: no media error');
+  assert.equal(r.missingMiddle.played.ended, true, 'missing middle chunk: plays to the end');
+  assert.ok(Math.abs(r.missingMiddle.duration - r.full.duration) < 0.1, 'missing middle chunk: timestamps kept');
+  assert.equal(r.missingMiddle.seekPastHole.error, null);
+  assert.match(r.missingFirst.element, /^error/, 'missing seq 0: element fails');
+  assert.match(String(r.missingFirst.decoded), /^error/, 'missing seq 0: decode fails');
+
+  // Through TestKit itself: two segments, then seq 0 of one and seq 2 of the
+  // other are deleted from IndexedDB before export.
+  r.pipeline = await seqGapPipeline(browser);
   return r;
 };
+
+async function seqGapPipeline(browser) {
+  const r = {};
+  const context = await browser.newContext({ acceptDownloads: true });
+  await context.grantPermissions(['microphone'], { origin: ORIGIN });
+  await context.addInitScript(INSTRUMENT);
+  const page = await context.newPage();
+  await startWithMic(page);
+  await beginRecording(page);
+  await sleep(4500);
+  await fid(page, 'pause').click();
+  await waitPhase(page, 'paused');
+  await fid(page, 'pause').click();
+  await waitAudio(page, 'live');
+  await sleep(5000);
+  await openPanel(page);
+  await fid(page, 'stop').click();
+  await fid(page, 'confirm-yes').click();
+  await waitPhase(page, 'stopped');
+  r.deleted = await page.evaluate(async () => {
+    const id = window.TestKit.controller.getState().sessionId;
+    const db = await new Promise((res) => {
+      const q = indexedDB.open('testkit');
+      q.onsuccess = () => res(q.result);
+    });
+    const tx = db.transaction('audio', 'readwrite');
+    const store = tx.objectStore('audio');
+    const rows = await new Promise((res) => {
+      const q = store.index('sessionId').getAll(IDBKeyRange.only(id));
+      q.onsuccess = () => res(q.result);
+    });
+    const segs = [...new Set(rows.sort((a, b) => a.ts - b.ts).map((x) => x.audioSegmentId))];
+    const victims = [rows.find((x) => x.audioSegmentId === segs[0] && x.seq === 0), rows.find((x) => x.audioSegmentId === segs[1] && x.seq === 2)];
+    for (const v of victims) store.delete(v.id);
+    await new Promise((res) => (tx.oncomplete = res));
+    db.close();
+    return { segments: segs.length, chunks: segs.map((sg) => rows.filter((x) => x.audioSegmentId === sg).length) };
+  });
+  const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+  const file = path.join(outDir, 'F-seq-gaps.html');
+  await download.saveAs(file);
+  const payload = await readExport(file);
+  r.audio = payload.audio.map((a) => ({ seqGaps: a.seqGaps ?? null }));
+  r.dropped = payload.audioDropped.map((d) => d.reason);
+  r.summary = payload.summaryMarkdown.split('\n').filter((l) => /Lost audio|Unreliable audio|Audio saved/.test(l));
+  r.lostGap = reportOf(payload).gaps.find((g) => /Audio segment lost/.test(g.reason || '')) ? true : false;
+  const offline = await browser.newContext({ offline: true });
+  const player = await openPlayer(offline, file);
+  r.decode = await decodeSmoke(player);
+  await offline.close();
+  await context.close();
+  assert.equal(r.deleted.segments, 2);
+  assert.deepEqual(r.dropped, ['missing-first-chunk'], 'segment without seq 0 dropped');
+  assert.deepEqual(r.audio, [{ seqGaps: [2] }], 'middle hole kept and reported');
+  assert.ok(r.summary.some((l) => l.startsWith('- Lost audio segments: 1')), r.summary.join(' | '));
+  assert.ok(r.summary.some((l) => l.startsWith('- Unreliable audio segments: 1')), r.summary.join(' | '));
+  assert.ok(r.lostGap, 'the dropped segment shows as a gap with its reason');
+  assert.equal(r.decode[0].error, null, 'segment with a hole still plays');
+  return r;
+}
 
 // H: 60 minutes' worth of audio (the supported maximum) through export.
 // Real time is impractical here, so a short real session gets 3600 extra 1 s

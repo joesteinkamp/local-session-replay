@@ -2,7 +2,7 @@
 // injected through createController({ deps }). rrweb and the esbuild-only
 // player bundle are stubbed by a resolve hook because session.js imports
 // them statically.
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 
@@ -32,7 +32,21 @@ Object.defineProperty(globalThis, 'navigator', {
   value: { userAgent: 'node-test', permissions: { query: async () => ({ state: permissions.state }) } },
 });
 
-const { createController, STALE_MS } = await import('../src/core/session.js');
+const session = await import('../src/core/session.js');
+const { STALE_MS } = session;
+
+// Every controller made by a test is stopped afterwards, so a test that fails
+// before its own stop() can't leave a ticker/heartbeat holding the process open.
+const controllers = new Set();
+async function createController(opts) {
+  const c = await session.createController(opts);
+  controllers.add(c);
+  return c;
+}
+afterEach(async () => {
+  for (const c of controllers) await c.stop().catch(() => {});
+  controllers.clear();
+});
 const { normalizeConfig } = await import('../src/core/config.js');
 const { groupAudioChunks } = await import('../src/core/store.js');
 
@@ -301,9 +315,9 @@ for (const action of ['stop', 'discard']) {
   });
 }
 
-test('a dismissed prompt is retried on the next page; a real denial sets stopAsking and keeps enabled', async () => {
+test('any NotAllowedError in a session sets stopAsking (Firefox/Safari forget a one-off block) and keeps enabled', async () => {
   const denied = Object.assign(new Error('nope'), { name: 'NotAllowedError' });
-  for (const [permission, stopAsking] of [['prompt', false], ['denied', true]]) {
+  for (const [permission, stopAsking] of [['prompt', true], ['denied', true]]) {
     permissions.state = permission;
     const store = memoryStore();
     seedRecording(store, { audio: { enabled: true, mime: 'audio/webm' } });
@@ -495,6 +509,7 @@ test('retryMic while paused re-acquires but leaves segment start to resume()', a
   const res = await controller.retryMic();
   assert.equal(res.ok, true);
   assert.equal(seen.segments.length, 1, 'no segment while paused');
+  assert.equal(controller.getState().audio.status, 'pending', 'not stuck at reconnecting, not live');
   await controller.resume();
   assert.equal(seen.segments.length, 2);
   await controller.stop();
@@ -627,4 +642,45 @@ test('after a devicechange, Retry swaps to a fresh stream; events from the old c
   await settle();
   assert.equal(controller.getState().audio.status, 'live');
   await controller.stop();
+});
+
+test('a Retry grant landing while pause() persists never records through the pause', async () => {
+  const { store, seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
+  seen.capture.kill();
+  seen.problem('ended');
+  const update = store.updateSession;
+  store.updateSession = async (...args) => {
+    await new Promise((r) => setTimeout(r, 50)); // slow IndexedDB write
+    return update(...args);
+  };
+  const pausing = controller.pause();
+  await new Promise((r) => setTimeout(r, 5)); // pause() is now awaiting persist, phase still 'recording'
+  const retry = controller.retryMic();
+  await Promise.all([pausing, retry]);
+  await settle();
+  const s = controller.getState();
+  assert.equal(s.phase, 'paused');
+  assert.equal(seen.capture.isRecording(), false, 'no segment running through the pause');
+  assert.equal(seen.segments.length, 1);
+  assert.ok(!['live', 'reconnecting'].includes(s.audio.status), s.audio.status);
+  store.updateSession = update;
+  await controller.resume();
+  assert.equal(seen.segments.length, 2, 'resume starts it');
+});
+
+test('a denial at Start sets stopAsking so later pages never prompt', async () => {
+  const store = memoryStore();
+  const { deps, seen } = fakeDeps({ micError: Object.assign(new Error('no'), { name: 'NotAllowedError' }) });
+  const controller = await createController({ config, store, deps });
+  await controller.beginPreflight();
+  await controller.start({ consent: true, audio: true });
+  assert.equal(savedSession(store).audio.enabled, true);
+  assert.equal(savedSession(store).audio.stopAsking, true);
+  assert.equal(controller.getState().audio.stopAsking, true);
+  const acquires = seen.acquires;
+  const next = await navigate(store, controller);
+  assert.equal(next.seen.acquires, 0, 'no prompt on the next page');
+  assert.equal(seen.acquires, acquires);
 });
