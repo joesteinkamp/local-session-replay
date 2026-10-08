@@ -1,5 +1,5 @@
 // Decides whether TestKit records on this page load. Shared by the script-tag
-// loader (src/loader.js) and the package entry (src/index.js), so it must stay
+// loader (src/loader.js) and the package entries (src/boot.js), so it must stay
 // tiny: casual viewers download it.
 
 // Per-study pointer `{ id, study, lastActivityAt }` written by testkit-core's
