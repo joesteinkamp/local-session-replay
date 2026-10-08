@@ -1,7 +1,7 @@
 # TestKit
 
 Local session replay and think-aloud recording for web prototypes.
-Add TestKit to an app, open it with `?test=1`, run through scripted
+Install TestKit into an app, mount `<TestKit />` (or call `init()`), open it with `?test=1`, run through scripted
 tasks while thinking aloud, and download **one self-contained HTML file** with
 the replay, synced audio, and an agent-ready summary.
 
@@ -10,37 +10,12 @@ they download the file.
 
 ## Install
 
-Three ways in, depending on the host app. In every case the recorder is only
-downloaded when testing is active, so casual viewers pay ~1 KB.
-
-### 1. Bundled apps (Vite, webpack, Next, …): install from GitHub
+Install TestKit into the app you're testing, then mount it. The recorder is
+only downloaded when testing is active, so casual viewers pay ~1 KB.
 
 ```sh
 npm i -D github:joesteinkamp/local-session-replay   # pin a tag: …/local-session-replay#v1.0.0
 ```
-
-```js
-import { init } from 'local-session-replay';
-
-init({
-  study: 'grid-filters-v2',
-  tasks: [
-    { id: 'filter', prompt: 'Filter to healthcare companies' },
-    { id: 'export', prompt: 'Export the current view' },
-  ],
-});
-```
-
-Call `init()` once, in the browser, at app startup. Client-side route changes
-are recorded automatically. With server rendering (Next, Nuxt, …), call it
-client-side, e.g. in a top-level `useEffect`; on the server it does nothing.
-The recorder is a dynamic import, so the host bundler splits it into its own
-chunk. Types ship with the package. The package is ES modules only, so a
-CommonJS test runner (e.g. Jest) needs it transformed or mocked.
-
-Activation defaults to `?test=1`. Passing an `activate` function replaces that
-check rather than adding to it, e.g. `activate: () => import.meta.env.DEV`
-(Vite) or `() => process.env.NODE_ENV !== 'production'` (webpack/Next).
 
 Installing from git builds the package on install (its `prepare` script), so
 the package manager must be allowed to run it:
@@ -51,7 +26,81 @@ the package manager must be allowed to run it:
   `pnpm.onlyBuiltDependencies` in `package.json` (or run `pnpm approve-builds`)
   and reinstall.
 
-### 2. Plain HTML: script tag from GitHub Pages
+The package is ES modules only, so a CommonJS test runner (e.g. Jest) needs it
+transformed or mocked. Types ship with it.
+
+### React: `<TestKit />`
+
+```jsx
+import { TestKit } from 'local-session-replay/react';
+
+export default function App() {
+  return (
+    <>
+      <TestKit
+        study="grid-filters-v2"
+        tasks={[
+          { id: 'filter', prompt: 'Filter to healthcare companies' },
+          { id: 'export', prompt: 'Export the current view' },
+        ]}
+      />
+      <YourPrototype />
+    </>
+  );
+}
+```
+
+Open the app with `?test=1`. Props are the [config](#config-reference). The
+component renders nothing itself; the overlay lives in its own Shadow DOM.
+React 18 and 19 are supported. `examples/react/` is a working Vite app.
+
+- **Mount it first**, before the prototype, so it reads `?test=1` before any
+  sibling effect (a router redirect, say) can strip the query string.
+- **Configuration is read once.** The first committed `<TestKit />` on the page
+  owns the configuration, even when it decides not to activate. Later prop
+  changes, remounts (StrictMode, HMR), and other copies are ignored. Reload the
+  page to change the configuration.
+- **Activation that's only known later** (auth, feature flags): mount it
+  conditionally, `{isTester && <TestKit … />}`. Don't render it with
+  `activate={false}` and flip it later: that first mount already decided.
+- **`activate` is not an authorization boundary.** It decides whether the
+  overlay shows, not who may record: the code ships to every visitor of the
+  bundle, and `?test=1` works for anyone. Gate on something real (a preview
+  deploy, a feature flag) if that matters.
+- **Unmounting doesn't stop a session.** Recording continues across route
+  changes until the tester stops it in the overlay.
+- **Next.js App Router:** the entry is marked `'use client'`, so server
+  components can render it. Functions can't be passed from a server component,
+  so use a boolean (`activate={process.env.NODE_ENV !== 'production'}`) or
+  wrap it in your own `'use client'` component to pass a function.
+- If the recorder chunk fails to load (e.g. after a redeploy), TestKit logs
+  `[TestKit] failed to start` to the console and stays off until a reload.
+
+### Other bundled apps (Vue, Svelte, vanilla): `init()`
+
+```js
+import { init } from 'local-session-replay';
+
+init({
+  study: 'grid-filters-v2',
+  tasks: [{ id: 'filter', prompt: 'Filter to healthcare companies' }],
+});
+```
+
+Call `init()` once, in the browser, at app startup. The same rules apply: only
+the first call on the page counts, and on the server it does nothing. This
+entry never imports React.
+
+Client-side route changes are recorded automatically. Activation defaults to
+`?test=1`. Passing an `activate` function replaces that check rather than
+adding to it, e.g. `activate: () => import.meta.env.DEV` (Vite) or
+`() => process.env.NODE_ENV !== 'production'` (webpack/Next). In both entries
+the recorder is a dynamic import, so the host bundler splits it into its own
+chunk.
+
+### Also supported: plain HTML without a bundler
+
+**Script tag from GitHub Pages:**
 
 ```html
 <script src="https://joesteinkamp.github.io/local-session-replay/v1/testkit.js"></script>
@@ -70,25 +119,24 @@ goes to a new path. Pages replaces the whole site on each deploy, so before
 `/v2/` ships, the workflow must also build `/v1/` (e.g. from a `v1` tag) into
 the same artifact.
 
-### 3. Self-hosted script files
-
-Copy `testkit.js`, `testkit-core.js` and `testkit-player.js` into one folder of
-the host app's static files (they're in `public/v1/` after `npm run build`, or
-`node_modules/local-session-replay/dist/script/` after option 1's install) and
-load `testkit.js` as in option 2. The loader fetches `testkit-core.js` from its
+**Self-hosted script files:** copy `testkit.js`, `testkit-core.js` and
+`testkit-player.js` into one folder of the host app's static files (they're in
+`public/v1/` after `npm run build`, or
+`node_modules/local-session-replay/dist/script/` after an npm install) and
+load `testkit.js` as above. The loader fetches `testkit-core.js` from its
 own folder. If the host injects `testkit.js` without a `<script src>`, pass
 `baseUrl` to say where that folder is, as an absolute URL or a root-relative
 path (`/testkit/v1/`). A plain relative path resolves against each page.
 
-Use one install per page: if both the package and the script tag are present,
-the first `init()` wins.
+Use one install per page: if the component, `init()`, and the script tag are
+mixed, the first one to run wins.
 
 ## Config reference
 
 | Option | Default | Notes |
 | :-- | :-- | :-- |
 | `study` | `'untitled-study'` | Used in the export filename and header. |
-| `activate` | `'query'` | `'query'` = show with `?test=1`; `true`/`false`; or a function returning a boolean. `?test=0` always disables. An in-progress session stays active across navigation without the query param. |
+| `activate` | `'query'` | `'query'` = show with `?test=1`; `true`/`false`; or a function returning a boolean. Evaluated once, at the first mount or `init()`. `?test=0` always disables. An in-progress session stays active across navigation without the query param. Not an access control. |
 | `audio` | `{ enabled: true, bitrate: 32000 }` | `audio: false` disables the mic entirely. ~15 MB/hour at 32 kbps. |
 | `mask` | `{ inputs: true }` | Masks typed values in the replay and the interaction log. |
 | `checkoutEveryNms` | `60000` | Periodic full DOM snapshots, so seeking stays fast. |
@@ -138,7 +186,13 @@ npm install
 npm test          # node:test unit tests
 npm run build     # → public/v1/ + public/demo/ (Pages) and dist/ (the package)
 npm run serve     # build, then serve public/ on :8080 → /demo/index.html?test=1
+npm run example:react   # build, then serve examples/react on :5181 → /?test=1
+npm run check:package   # pack the tarball, install it into scratch apps (React 18/19, no React), import both entries
 ```
+
+`examples/react/` is an npm workspace that links this package, so `npm install`
+at the root installs it too. Its link doesn't run `prepare`, which is why
+`example:react` builds first.
 
 Module boundaries and data formats are in `docs/CONTRACTS.md`.
 `scripts/fixture-export.mjs` writes a synthetic export for working on the player.

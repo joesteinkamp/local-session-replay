@@ -34,7 +34,7 @@ rrweb is the recording primitive. It emits a JSON event stream (a full DOM snaps
 
 ```
 prototype page
- ├─ <script src=".../testkit/v1/testkit.js">
+ ├─ <TestKit /> from the npm package (or <script src=".../testkit/v1/testkit.js"> on plain HTML)
  └─ TestKit
      ├─ Overlay UI (Shadow DOM, excluded from recording)
      ├─ DOM recorder (rrweb)
@@ -119,9 +119,9 @@ TestKit.init({
 
 ### Phase 6: Distribution
 
-- The toolkit lives in its own GitLab Pages project.
-- Prototypes include it with a single `<script>` tag.
-- Versioned paths (`/v1/testkit.js`), so updates never break older prototypes.
+- **Primary: install into the app under test** (Agentation-style), not a separately hosted toolkit. `npm i -D` from GitHub; the host's bundler owns the code and splits the recorder into a chunk that only loads when testing is active.
+- **React is the primary integration:** `<TestKit study tasks … />` from `local-session-replay/react`, mounted first. Other bundled apps (Vue, Svelte, vanilla) call `init()` from `local-session-replay`. One package, two entries; see `react-adapter-plan.md`.
+- **Secondary: Pages script tag** for plain HTML prototypes without a bundler: a single `<script>` tag, with versioned paths (`/v1/testkit.js`) so updates never break older prototypes.
 - Short README covering setup, config reference, and a facilitator checklist.
 
 ### v1.5: Local transcription
@@ -133,7 +133,7 @@ TestKit.init({
 ### Later
 
 - In-session flagging ("this is confusing") on an element, borrowing Agentation's annotate interaction.
-- Optional React adapter, if prototypes need tighter integration.
+- A React controller hook (`useTestKit()`), if apps need to drive session UI or flow themselves. The `<TestKit />` component itself shipped in Phase 6.
 - Optional drop into a shared Drive folder. The file format stays unchanged.
 
 ## Known limitations
