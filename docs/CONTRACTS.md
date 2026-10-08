@@ -251,8 +251,9 @@ controller.cancelPreflight()               // preflight → idle (releases mic)
 controller.requestMic() → Promise<{ ok, error? }>   // preflight mic test
 controller.getMicLevel() → number 0..1     // RMS level, poll from rAF for the meter
 controller.start({ consent: true, audio: boolean }) // preflight → recording, task 0 begins
-controller.nextTask({ followUpAnswer? })   // ends current task; after last task → stop()
-controller.skipTask()                      // like nextTask(), but task-end {completed:false, reason:'skipped'}, counts tasksSkipped, no follow-up
+controller.nextTask({ followUpAnswer?, taskIndex? })   // ends current task; after last task → stop()
+controller.skipTask({ taskIndex? })        // like nextTask(), but task-end {completed:false, reason:'skipped'}, counts tasksSkipped, no follow-up
+                                           // taskIndex = the task the click was for; a call whose taskIndex is no longer current is a no-op (double click)
 controller.pause() / controller.resume()
 controller.toggleMute()
 controller.retryMic() → Promise<{ ok, error?, persistent?, stale? }>  // recording/paused; not queued (see Audio state)
@@ -465,7 +466,10 @@ rrweb (`blockClass: 'testkit-block'`) and from the interaction log.
 
 Task controls: **Skip task** (`data-fid="skip-task"`, a plain secondary button
 before the primary Next task/Finish, disabled while paused, hidden during a
-follow-up question and in free exploration) calls `skipTask()`. The stopped panel
+follow-up question and in free exploration) calls `skipTask()`. Next, Skip task and the follow-up buttons advance at most
+once per click: the second click of a double click (`event.detail > 1`) is
+ignored, a press while the previous call is in flight is ignored, and the call
+carries `taskIndex` so the controller drops a stale one. The stopped panel
 shows "N of M completed, K skipped" and **Start new session**
 (`data-fid="new-session"`; confirm buttons `confirm-download`,
 `confirm-discard-new`, `confirm-cancel`) as described under Controller.

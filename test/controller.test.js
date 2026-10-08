@@ -803,3 +803,19 @@ test('a without-audio download does not count as downloaded: the audio is never 
   await withDownloadStubs(() => controller.exportSession());
   assert.equal(controller.getState().downloaded, true);
 });
+
+test('a double click on Skip/Next advances once: a call for a task that is no longer current is ignored', async () => {
+  const { store, controller } = await startSession();
+  await controller.nextTask({ taskIndex: 0 });
+  // Second-to-last task, double-clicked: must not end the session.
+  await Promise.all([controller.skipTask({ taskIndex: 1 }), controller.skipTask({ taskIndex: 1 })]);
+  let s = controller.getState();
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.taskIndex, 2);
+  assert.equal(s.tasksSkipped, 1);
+  await Promise.all([controller.nextTask({ taskIndex: 2 }), controller.nextTask({ taskIndex: 2 })]);
+  s = controller.getState();
+  assert.equal(s.phase, 'stopped');
+  assert.equal(s.tasksCompleted, 2);
+  assert.equal(store.log.filter((e) => e.type === 'task-end').length, 3);
+});

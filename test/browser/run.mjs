@@ -1122,10 +1122,17 @@ scenarios.I = async (browser) => {
   await openPanel(page);
   await fid(page, 'start').click();
   await startScreenOnly();
-  await fid(page, 'skip-task').click();
+  // Double clicks advance once, including on the second-to-last task.
+  await fid(page, 'skip-task').dblclick();
   await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 1, null, { what: 'task 2' });
-  await fid(page, 'next').click();
+  await sleep(500);
+  r.afterDblSkip = (await state(page)).taskIndex;
+  await fid(page, 'next').dblclick();
   await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 2, null, { what: 'task 3' });
+  await sleep(500);
+  r.afterDblNext = { taskIndex: (await state(page)).taskIndex, phase: (await state(page)).phase };
+  assert.equal(r.afterDblSkip, 1, 'double-clicked Skip advanced once');
+  assert.deepEqual(r.afterDblNext, { taskIndex: 2, phase: 'recording' }, 'double-clicked Next advanced once');
   await fid(page, 'skip-task').click(); // task 3 has a follow-up: Skip bypasses it
   await waitPhase(page, 'stopped');
   r.panelTally = await page.locator('.tk-meta dd').nth(2).textContent();

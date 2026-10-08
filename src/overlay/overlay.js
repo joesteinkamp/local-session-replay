@@ -158,6 +158,7 @@ function mount(controller) {
     timeUp: false,
     finishedLast: false, // tester pressed Finish on the last task (this page load)
     skipped: false, // the task change in flight came from Skip task
+    advancing: false, // a Next/Skip call is in flight
     focusNext: null, // data-fid to focus after the next render
     forceFocus: false, // focus even if focus wasn't inside the overlay
   };
@@ -409,7 +410,12 @@ function mount(controller) {
     act(() => controller.start({ consent: true, audio }));
   }
 
-  function onNext() {
+  // The second click of a double click (event.detail 2+) may land on the next
+  // task's freshly rendered button; it is never a separate decision.
+  const repeatClick = (e) => Number(e?.detail) > 1;
+
+  function onNext(e) {
+    if (repeatClick(e)) return;
     const task = currentTask();
     if (task?.followUp && ui.followUpFor !== state.taskIndex) {
       ui.followUpFor = state.taskIndex;
@@ -423,20 +429,35 @@ function mount(controller) {
       return;
     }
     markIfLast();
-    act(() => controller.nextTask({}));
+    advanceOnce((taskIndex) => controller.nextTask({ taskIndex }));
   }
 
-  function submitFollowUp(skip) {
+  function submitFollowUp(skip, e) {
+    if (repeatClick(e)) return;
     const answer = skip ? undefined : ui.followUpText.trim();
     markIfLast();
-    act(() => controller.nextTask(answer ? { followUpAnswer: answer } : {}));
+    advanceOnce((taskIndex) => controller.nextTask(answer ? { followUpAnswer: answer, taskIndex } : { taskIndex }));
+  }
+
+  // One task change per click: a double click (or a second press before the
+  // controller answers) must not advance twice. The controller also ignores a
+  // call whose taskIndex is no longer current.
+  function advanceOnce(fn) {
+    if (ui.advancing) return;
+    ui.advancing = true;
+    const taskIndex = state.taskIndex;
+    const done = () => {
+      ui.advancing = false;
+    };
+    Promise.resolve(act(() => fn(taskIndex))).then(done, done);
   }
 
   // Secondary to Next: the task ends as skipped, not completed; no follow-up.
-  function onSkip() {
+  function onSkip(e) {
+    if (repeatClick(e)) return;
     ui.skipped = true;
     ui.finishedLast = false;
-    act(() => controller.skipTask());
+    advanceOnce((taskIndex) => controller.skipTask({ taskIndex }));
   }
 
   // A full download (audio included) counts; a visual-only one doesn't.
@@ -919,11 +940,11 @@ function mount(controller) {
       actions.push(h(
         'div',
         { class: 'tk-row' },
-        btn('Skip', { fid: 'followup-skip', onclick: () => submitFollowUp(true) }),
+        btn('Skip', { fid: 'followup-skip', onclick: (e) => submitFollowUp(true, e) }),
         btn(isLast ? 'Submit and finish' : 'Submit and continue', {
           variant: 'is-primary is-grow',
           fid: 'followup-submit',
-          onclick: () => submitFollowUp(false),
+          onclick: (e) => submitFollowUp(false, e),
         }),
       ));
     } else {

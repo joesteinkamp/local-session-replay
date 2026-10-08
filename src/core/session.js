@@ -596,9 +596,11 @@ export async function createController({ config, store, deps = {} }) {
   }
 
   // Next and Skip: end the current task, count it, then begin the next one
-  // or stop after the last.
-  async function advance({ skipped, followUpAnswer }) {
+  // or stop after the last. `taskIndex` is the task the click was for: a
+  // second click queued behind the first (double click) is stale and ignored.
+  async function advance({ skipped, followUpAnswer, taskIndex }) {
     if (state.phase !== 'recording') return;
+    if (taskIndex != null && taskIndex !== session.taskIndex) return;
     flushInputs();
     const task = currentTask();
     if (!skipped && task && followUpAnswer != null && String(followUpAnswer).trim()) {
@@ -941,14 +943,14 @@ export async function createController({ config, store, deps = {} }) {
       });
     },
 
-    nextTask({ followUpAnswer } = {}) {
-      return act(() => advance({ skipped: false, followUpAnswer }));
+    nextTask({ followUpAnswer, taskIndex } = {}) {
+      return act(() => advance({ skipped: false, followUpAnswer, taskIndex }));
     },
 
     // Like nextTask(), but the task ends as not completed (reason 'skipped')
     // and counts toward tasksSkipped; no follow-up answer is recorded.
-    skipTask() {
-      return act(() => advance({ skipped: true }));
+    skipTask({ taskIndex } = {}) {
+      return act(() => advance({ skipped: true, taskIndex }));
     },
 
     pause() {
