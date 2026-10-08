@@ -5,6 +5,7 @@ import RRWEB_CSS from 'rrweb-player/dist/style.css';
 import PLAYER_CSS from './player.css';
 import {
   GAPS_MEANING, audioReport, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
+  skippedSuffix, taskCounts,
 } from '../export/summary.js';
 import { buildFilename } from '../export/html.js';
 import { findRemoteAssets } from './assets.js';
@@ -418,6 +419,7 @@ function mount() {
     const prompt = span.task?.prompt || span.taskId || 'Untitled task';
     return { ...span, n, prompt, label: `Task ${n}: ${prompt}`, short: `${n}. ${prompt}` };
   });
+  const counts = taskCounts(spans, tasks);
   const errors = log.filter((e) => e.type === 'error' || e.type === 'rejection');
   // Same verdict and gap list as the summary and the overlay's pre-download line.
   const saved = audioReport({ session, log, events, audio: savedSegments, dropped: data.audioDropped });
@@ -468,7 +470,7 @@ function mount() {
       h('dl', { class: 'tk-meta' },
         metaItem('Started', formatLocal(sessionStart)),
         metaItem('Duration', durationText),
-        metaItem('Tasks', `${spans.filter((s) => s.completed).length} of ${tasks.length || spans.length} completed`),
+        metaItem('Tasks', `${counts.done} of ${counts.total} completed${skippedSuffix(counts)}`),
         metaItem('Audio', h('span', { title: saved.kind === 'gaps' ? GAPS_MEANING : null }, savedText)),
         metaItem('Browser', describeBrowser(meta.userAgent)),
         metaItem('Viewport', meta.viewport ? `${meta.viewport.w} × ${meta.viewport.h}` : 'unknown'),
@@ -533,7 +535,8 @@ function mount() {
     if (errCount) badges.push(h('span', { class: 'tk-badge tk-badge--danger' }, `${errCount} error${errCount > 1 ? 's' : ''}`));
     if (detectRageClicks(entries).length) badges.push(h('span', { class: 'tk-badge' }, 'Rage clicks'));
     if (span.task?.timeLimit && active > span.task.timeLimit * 1000) badges.push(h('span', { class: 'tk-badge' }, 'Over time limit'));
-    if (!span.completed) badges.push(h('span', { class: 'tk-badge' }, 'Not completed'));
+    if (span.skipped) badges.push(h('span', { class: 'tk-badge' }, 'Skipped'));
+    else if (!span.completed) badges.push(h('span', { class: 'tk-badge' }, 'Not completed'));
     const btn = h('button', {
       type: 'button',
       class: 'tk-task',

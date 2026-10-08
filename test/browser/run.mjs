@@ -1075,6 +1075,233 @@ scenarios.G = async (browser) => {
   return r;
 };
 
+// I: product gaps found in a real-app integration (no audio needed).
+//  - a redirect that strips ?test=1 before init() still activates (snapshot)
+//  - Skip task shows as Skipped in the stopped panel, summary and player
+//  - Start new session: straight to setup once downloaded (the downloaded
+//    session is deleted when the next starts); otherwise asks first
+scenarios.I = async (browser) => {
+  const r = {};
+  const context = await browser.newContext({ acceptDownloads: true });
+  // Like a router beforeLoad redirect: the URL loses ?test=1 between the
+  // package's first evaluation and init().
+  await context.route(`${DEMO}/redirect.html*`, (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Redirect</title>
+      <link rel="stylesheet" href="styles.css">
+      <script src="../v1/testkit.js"></script>
+      <script>history.replaceState(null, '', 'redirect.html#signal-report');</script>
+      <script src="testkit-config.js"></script></head>
+      <body><main><h1>Signal report</h1></main></body></html>`,
+  }));
+  const page = await context.newPage();
+  await page.goto(`${DEMO}/redirect.html?test=1`);
+  await page.locator('#testkit-root').waitFor({ state: 'attached', timeout: 10_000 });
+  r.redirectSearch = await page.evaluate(() => location.search);
+  assert.equal(r.redirectSearch, '', 'the redirect dropped the param');
+
+  const sessionsInDb = () => page.evaluate(async () => {
+    const db = await new Promise((res) => {
+      const q = indexedDB.open('testkit');
+      q.onsuccess = () => res(q.result);
+    });
+    const ids = await new Promise((res) => {
+      const q = db.transaction('sessions').objectStore('sessions').getAllKeys();
+      q.onsuccess = () => res(q.result);
+    });
+    db.close();
+    return ids;
+  });
+  const startScreenOnly = async () => {
+    await fid(page, 'skip-audio').click();
+    await fid(page, 'consent').check();
+    await fid(page, 'start-session').click();
+    await waitPhase(page, 'recording');
+  };
+
+  await openPanel(page);
+  await fid(page, 'start').click();
+  await startScreenOnly();
+  // Double clicks advance once, including on the second-to-last task.
+  await fid(page, 'skip-task').dblclick();
+  await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 1, null, { what: 'task 2' });
+  await sleep(500);
+  r.afterDblSkip = (await state(page)).taskIndex;
+  await fid(page, 'next').dblclick();
+  await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 2, null, { what: 'task 3' });
+  await sleep(500);
+  r.afterDblNext = { taskIndex: (await state(page)).taskIndex, phase: (await state(page)).phase };
+  assert.equal(r.afterDblSkip, 1, 'double-clicked Skip advanced once');
+  assert.deepEqual(r.afterDblNext, { taskIndex: 2, phase: 'recording' }, 'double-clicked Next advanced once');
+  await fid(page, 'skip-task').click(); // task 3 has a follow-up: Skip bypasses it
+  await waitPhase(page, 'stopped');
+  r.panelTally = await page.locator('.tk-meta dd').nth(2).textContent();
+  r.panelHeading = await page.locator('.tk-h').textContent();
+  const firstId = (await state(page)).sessionId;
+  const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+  const file = path.join(outDir, 'I-skipped.html');
+  await download.saveAs(file);
+  const payload = await readExport(file);
+  r.summaryTasks = payload.summaryMarkdown.split('\n').find((l) => l.startsWith('- Tasks completed:'));
+  r.summaryStatuses = payload.summaryMarkdown.split('\n').filter((l) => l.startsWith('- Status:'));
+  const player = await openPlayer(context, file);
+  r.playerTasks = await player.locator('.tk-meta').textContent();
+  r.playerSkippedBadges = await player.locator('.tk-badge', { hasText: 'Skipped' }).count();
+  await player.close();
+  assert.equal(r.panelTally, '1 of 3 completed, 2 skipped');
+  assert.equal(r.panelHeading, 'Session complete');
+  assert.equal(r.summaryTasks, '- Tasks completed: 1 of 3, 2 skipped');
+  assert.deepEqual(r.summaryStatuses, ['- Status: Skipped', '- Status: Completed', '- Status: Skipped']);
+  assert.match(r.playerTasks, /1 of 3 completed, 2 skipped/);
+  assert.equal(r.playerSkippedBadges, 2);
+
+  // Downloaded: Start new session goes straight to setup; Cancel comes back.
+  await fid(page, 'new-session').click();
+  await waitPhase(page, 'preflight');
+  r.previousNotice = await page.locator('[data-previous-download]').textContent();
+  assert.match(r.previousNotice, /previous session’s file was downloaded at/);
+  await fid(page, 'cancel').click();
+  await waitPhase(page, 'stopped');
+  r.backToSame = (await state(page)).sessionId === firstId;
+  await fid(page, 'new-session').click();
+  await waitPhase(page, 'preflight');
+  await startScreenOnly();
+  const secondId = (await state(page)).sessionId;
+  r.afterSecondStart = await sessionsInDb();
+  assert.ok(r.backToSame, 'Cancel returns to the stopped session');
+  assert.deepEqual(r.afterSecondStart, [secondId], 'the downloaded session was deleted once the next one started');
+
+  // Not downloaded: asks first; Download first, then straight to setup.
+  await fid(page, 'stop').click();
+  await fid(page, 'confirm-yes').click();
+  await waitPhase(page, 'stopped');
+  await fid(page, 'new-session').click();
+  r.confirmText = await page.locator('#tk-new-q').textContent();
+  r.phaseWhileAsking = (await state(page)).phase;
+  await Promise.all([page.waitForEvent('download'), fid(page, 'confirm-download').click()]);
+  await waitFor(page, () => window.TestKit.controller.getState().downloaded === true, null, { what: 'downloaded' });
+  await fid(page, 'new-session').click();
+  await waitPhase(page, 'preflight');
+  assert.match(r.confirmText, /hasn’t been downloaded/);
+  assert.equal(r.phaseWhileAsking, 'stopped');
+  await fid(page, 'cancel').click();
+  await waitPhase(page, 'stopped');
+  await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+  return r;
+};
+
+// J: 14 log entries in one millisecond keep their order in the export (row
+// keys `<batchId>:l<n>` alone sort l10 before l2).
+scenarios.J = async (browser) => {
+  const r = {};
+  const context = await browser.newContext({ acceptDownloads: true });
+  const page = await context.newPage();
+  await page.goto(`${DEMO}/index.html?test=1`);
+  await page.locator('#testkit-root').waitFor({ state: 'attached' });
+  await page.evaluate(async () => {
+    const c = window.TestKit.controller;
+    await c.beginPreflight();
+    await c.start({ consent: true, audio: false });
+  });
+  await sleep(2500); // the start batch flushes, so the clicks start a batch at l0
+  r.clicked = await page.evaluate(() => {
+    const ids = [];
+    for (let i = 0; i < 14; i++) {
+      const b = document.createElement('button');
+      b.id = `b${String(i).padStart(2, '0')}`;
+      b.textContent = b.id;
+      document.querySelector('main').append(b);
+      ids.push(b.id);
+    }
+    const t = Date.now();
+    for (const id of ids) document.getElementById(id).click();
+    return { ids, sameMs: Date.now() === t };
+  });
+  await sleep(2500);
+  // SPA navigation to a deeper path: the player source must still load from
+  // the folder testkit-core.js came from, not relative to the page.
+  await page.evaluate(() => history.pushState(null, '', '/demo/app/deep/route'));
+  await page.evaluate(() => window.TestKit.controller.stop());
+  await waitPhase(page, 'stopped');
+  const sourceRequests = [];
+  page.on('request', (req) => /testkit-player-source/.test(req.url()) && sourceRequests.push(new URL(req.url()).pathname));
+  await openPanel(page);
+  const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+  r.playerSourceRequests = sourceRequests;
+  assert.deepEqual(sourceRequests, ['/v1/testkit-player-source.js'], 'loaded next to testkit-core.js, once, at export');
+  const file = path.join(outDir, 'J-order.html');
+  await download.saveAs(file);
+  const payload = await readExport(file);
+  r.exported = payload.log.filter((e) => e.type === 'click' && /^#b\d/.test(e.selector)).map((e) => e.selector.slice(1));
+  assert.deepEqual(r.exported, r.clicked.ids);
+  const player = await openPlayer(context, file); // the inlined player runs offline
+  r.playerLoaded = await player.evaluate(() => !!window.TestKitPlayer?.data);
+  await player.close();
+  assert.ok(r.playerLoaded);
+  await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+  return r;
+};
+
+// K: the npm package build (dist/) in a module page: the ?test snapshot
+// survives a redirect, and export loads the lazily split player chunk after
+// an SPA navigation. dist/ is served under /pkg/ by request routing.
+scenarios.K = async (browser) => {
+  const r = {};
+  const distDir = path.join(root, 'dist');
+  const context = await browser.newContext({ acceptDownloads: true });
+  await context.route(`${ORIGIN}/pkg/**`, async (route) => {
+    const { pathname } = new URL(route.request().url());
+    if (pathname.startsWith('/pkg/dist/')) {
+      const file = path.join(distDir, pathname.slice('/pkg/dist/'.length));
+      if (!file.startsWith(distDir) || !existsSync(file)) return route.fulfill({ status: 404, body: 'not found' });
+      return route.fulfill({ contentType: 'text/javascript', body: await readFile(file) });
+    }
+    return route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Package app</title>
+        <script type="module">
+          import { init } from '/pkg/dist/index.js';
+          history.replaceState(null, '', '/pkg/app/signal-report'); // router redirect drops ?test=1
+          window.__boot = init({ study: 'pkg-study', audio: false, tasks: [{ id: 't1', prompt: 'One' }] });
+        </script></head><body><main><h1>Package app</h1><button id="go">Go</button></main></body></html>`,
+    });
+  });
+  const page = await context.newPage();
+  await page.goto(`${ORIGIN}/pkg/app/?test=1`);
+  await page.locator('#testkit-root').waitFor({ state: 'attached', timeout: 15_000 });
+  r.search = await page.evaluate(() => location.search);
+  await page.evaluate(async () => {
+    const c = window.TestKit.controller;
+    await c.beginPreflight();
+    await c.start({ consent: true, audio: false });
+  });
+  await page.locator('#go').click();
+  await page.evaluate(() => history.pushState(null, '', '/pkg/app/elsewhere/deeper'));
+  await page.evaluate(() => window.TestKit.controller.stop());
+  await waitPhase(page, 'stopped');
+  const playerChunks = [];
+  page.on('request', (req) => /testkit-player-/.test(req.url()) && playerChunks.push(new URL(req.url()).pathname));
+  await openPanel(page);
+  const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
+  const file = path.join(outDir, 'K-package.html');
+  await download.saveAs(file);
+  r.playerChunkRequests = playerChunks;
+  const payload = await readExport(file);
+  r.clickLogged = payload.log.some((e) => e.type === 'click' && e.selector === '#go');
+  const player = await openPlayer(context, file);
+  r.playerLoaded = await player.evaluate(() => !!window.TestKitPlayer?.data);
+  await player.close();
+  assert.equal(r.search, '');
+  assert.ok(r.playerChunkRequests.length === 1 && r.playerChunkRequests[0].startsWith('/pkg/dist/chunks/'), JSON.stringify(r.playerChunkRequests));
+  assert.ok(r.clickLogged);
+  assert.ok(r.playerLoaded);
+  await page.evaluate(() => window.TestKit.controller.discard());
+  await context.close();
+  return r;
+};
+
 // ---------------------------------------------------------------------------
 
 async function main() {

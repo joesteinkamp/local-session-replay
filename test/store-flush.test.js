@@ -112,3 +112,27 @@ test('importSpill() skips sessions that no longer exist', async () => {
   await store.importSpill();
   assert.equal([...rows.values()].filter((r) => r.sessionId === 'gone').length, 0);
 });
+
+// The real write path: 14 entries in one millisecond, then a second batch in
+// the same millisecond whose random id sorts first. Read back in IndexedDB key
+// order (string compare), the export order must still be the append order.
+test('log rows written in one millisecond come back in append order', async () => {
+  sessions.set('s5', { id: 's5' });
+  rows.clear();
+  const realUUID = crypto.randomUUID;
+  const ids = ['zzzz', 'aaaa'];
+  crypto.randomUUID = () => ids.shift() ?? realUUID.call(crypto);
+  try {
+    for (let i = 0; i < 14; i++) store.appendLog('s5', { ts: 1000, type: 'click', selector: `#b${String(i).padStart(2, '0')}` });
+    await store.flush();
+    store.appendLog('s5', { ts: 1000, type: 'nav', navType: 'pushState' });
+    await store.flush();
+  } finally {
+    crypto.randomUUID = realUUID;
+  }
+  const stored = [...rows.entries()].filter(([k, r]) => k.startsWith('log/') && r.sessionId === 's5').map(([, r]) => r);
+  stored.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  assert.notEqual(stored[0].type, 'click', 'key order alone would misplace the nav (precondition)');
+  const log = store.sortLog(stored);
+  assert.deepEqual(log.map((e) => e.selector ?? e.type), [...Array.from({ length: 14 }, (_, i) => `#b${String(i).padStart(2, '0')}`), 'nav']);
+});

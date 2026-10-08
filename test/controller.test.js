@@ -9,7 +9,7 @@ import { register } from 'node:module';
 register(
   `data:text/javascript,${encodeURIComponent(`
     export async function resolve(specifier, context, next) {
-      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,export default ""', shortCircuit: true };
+      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,export const loadPlayerJs = async () => ""', shortCircuit: true };
       if (specifier === 'rrweb') return { url: 'data:text/javascript,export function record() {}', shortCircuit: true };
       return next(specifier, context);
     }`)}`,
@@ -683,4 +683,175 @@ test('a denial at Start sets stopAsking so later pages never prompt', async () =
   const next = await navigate(store, controller);
   assert.equal(next.seen.acquires, 0, 'no prompt on the next page');
   assert.equal(seen.acquires, acquires);
+});
+
+test('skipTask ends the task as skipped, counts it apart from completed ones, and advances', async () => {
+  const { store, seen, controller } = await startSession();
+  await controller.nextTask();
+  await controller.skipTask();
+  let s = controller.getState();
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.taskIndex, 2);
+  assert.equal(s.tasksCompleted, 1);
+  assert.equal(s.tasksSkipped, 1);
+  assert.equal(savedSession(store).tasksSkipped, 1, 'persisted');
+  await controller.skipTask(); // the last task: stops like nextTask()
+  s = controller.getState();
+  assert.equal(s.phase, 'stopped');
+  assert.equal(s.tasksSkipped, 2);
+  const ends = store.log.filter((e) => e.type === 'task-end');
+  assert.deepEqual(ends.map((e) => [e.taskId, e.completed, e.reason]), [['t1', true, undefined], ['t2', false, 'skipped'], ['t3', false, 'skipped']]);
+  assert.deepEqual(seen.marks.filter((m) => m.tag === 'testkit:task-end').map((m) => m.payload.reason), [undefined, 'skipped', 'skipped']);
+  assert.equal(store.log.filter((e) => e.type === 'session-end').length, 1);
+});
+
+test('skipTask is a no-op while paused and records no follow-up answer', async () => {
+  const { store, controller } = await startSession();
+  await controller.pause();
+  await controller.skipTask();
+  assert.equal(controller.getState().taskIndex, 0);
+  await controller.resume();
+  await controller.skipTask({ followUpAnswer: 'ignored' });
+  assert.equal(store.log.filter((e) => e.type === 'followup').length, 0);
+  assert.equal(controller.getState().taskIndex, 1);
+});
+
+// download() needs an anchor and revokes the object URL after 60 s.
+async function withDownloadStubs(fn) {
+  const saved = { createElement: document.createElement, documentElement: document.documentElement };
+  document.createElement = () => ({ style: {}, click() {}, remove() {} });
+  document.documentElement = { appendChild: noop };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (cb, ms, ...args) => {
+    const t = realSetTimeout(cb, ms, ...args);
+    if (ms >= 60_000) t.unref?.();
+    return t;
+  };
+  try {
+    return await fn();
+  } finally {
+    Object.assign(document, saved);
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+
+function exportable(store) {
+  store.loadSessionData = async (id) => ({ session: structuredClone(store.sessions.get(id)), events: [], log: [], audio: [], audioDropped: [] });
+}
+
+test('Start new session from stopped: cancel returns to the stopped session; start keeps an undownloaded one', async () => {
+  const { store, controller } = await startSession();
+  await controller.stop();
+  const oldId = controller.getState().sessionId;
+  assert.equal(controller.getState().downloaded, false);
+  await controller.beginPreflight();
+  assert.equal(controller.getState().phase, 'preflight');
+  assert.equal(controller.getState().previousDownloadedAt, null);
+  assert.equal(store.getLastSessionId('study-a'), oldId, 'still exportable after a reload during setup');
+  await controller.cancelPreflight();
+  assert.equal(controller.getState().phase, 'stopped');
+  assert.equal(controller.getState().sessionId, oldId);
+  await controller.beginPreflight();
+  await controller.start({ consent: true, audio: false });
+  const s = controller.getState();
+  assert.equal(s.phase, 'recording');
+  assert.notEqual(s.sessionId, oldId);
+  assert.ok(store.sessions.has(oldId), 'never deletes a session that was not downloaded');
+  assert.equal(store.getActiveSessionId('study-a'), s.sessionId);
+  assert.equal(store.getLastSessionId('study-a'), null);
+});
+
+test('a downloaded session is marked, survives a reload as downloaded, and is deleted when the next session starts', async () => {
+  const { store, controller } = await startSession();
+  exportable(store);
+  await controller.stop();
+  const oldId = controller.getState().sessionId;
+  await withDownloadStubs(() => controller.exportSession());
+  assert.equal(controller.getState().downloaded, true);
+  assert.ok(store.sessions.get(oldId).exportedAt > 0, 'persisted');
+  const reloaded = await createController({ config, store, deps: fakeDeps().deps });
+  assert.equal(reloaded.getState().phase, 'stopped');
+  assert.equal(reloaded.getState().downloaded, true);
+  await reloaded.beginPreflight();
+  assert.equal(reloaded.getState().downloaded, false, 'setup is a fresh state');
+  assert.equal(reloaded.getState().previousDownloadedAt, store.sessions.get(oldId).exportedAt, 'setup says when the previous file was downloaded');
+  assert.ok(store.sessions.has(oldId), 'kept through setup');
+  await reloaded.start({ consent: true, audio: false });
+  assert.equal(store.sessions.has(oldId), false);
+  assert.equal(store.sessions.size, 1);
+});
+
+test('a without-audio download does not count as downloaded: the audio is never deleted by starting over', async () => {
+  const { store, controller } = await startSession({ audio: true });
+  await controller.stop();
+  const oldId = controller.getState().sessionId;
+  const rec = savedSession(store);
+  store.loadSessionData = async () => ({
+    session: structuredClone(rec), events: [], log: [],
+    audio: [{ audioSegmentId: 'a', startTs: rec.startedAt, endTs: rec.endedAt, mime: 'audio/webm', blob: new Blob(['x']) }], audioDropped: [],
+  });
+  await withDownloadStubs(() => controller.exportSession({ withoutAudio: true }));
+  const s = controller.getState();
+  assert.equal(s.downloaded, false);
+  assert.equal(s.downloadedWithoutAudio, true);
+  assert.equal(store.sessions.get(oldId).exportedAt, undefined);
+  assert.ok(store.sessions.get(oldId).exportedWithoutAudioAt > 0, 'persisted');
+  const reloaded = await createController({ config, store, deps: fakeDeps().deps });
+  assert.equal(reloaded.getState().downloadedWithoutAudio, true);
+  await reloaded.beginPreflight();
+  await reloaded.start({ consent: true, audio: false });
+  assert.ok(store.sessions.has(oldId), 'the only copy of the audio stays');
+  // A full download afterwards does count.
+  await withDownloadStubs(() => controller.exportSession());
+  assert.equal(controller.getState().downloaded, true);
+});
+
+test('a double click on Skip/Next advances once: a call for a task that is no longer current is ignored', async () => {
+  const { store, controller } = await startSession();
+  await controller.nextTask({ taskIndex: 0 });
+  // Second-to-last task, double-clicked: must not end the session.
+  await Promise.all([controller.skipTask({ taskIndex: 1 }), controller.skipTask({ taskIndex: 1 })]);
+  let s = controller.getState();
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.taskIndex, 2);
+  assert.equal(s.tasksSkipped, 1);
+  await Promise.all([controller.nextTask({ taskIndex: 2 }), controller.nextTask({ taskIndex: 2 })]);
+  s = controller.getState();
+  assert.equal(s.phase, 'stopped');
+  assert.equal(s.tasksCompleted, 2);
+  assert.equal(store.log.filter((e) => e.type === 'task-end').length, 3);
+});
+
+test('free exploration (no tasks): nextTask() and skipTask() record nothing and keep recording', async () => {
+  const { deps } = fakeDeps();
+  const store = memoryStore();
+  const controller = await createController({ config: normalizeConfig({ study: 'study-a', tasks: [] }), store, deps });
+  await controller.beginPreflight();
+  await controller.start({ consent: true, audio: false });
+  await controller.nextTask();
+  await controller.skipTask();
+  const s = controller.getState();
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.tasksCompleted, 0);
+  assert.equal(s.tasksSkipped, 0);
+  assert.equal(store.log.filter((e) => e.type === 'task-end').length, 0);
+});
+
+// The mirror carries the count across a navigation whose IndexedDB write was
+// aborted at unload (MIRRORED in session.js must list tasksSkipped).
+test('tasksSkipped survives a navigation that aborted the IndexedDB write', async () => {
+  const store = memoryStore();
+  const mirrors = new Map();
+  store.setSessionMirror = (m) => mirrors.set(m.id, structuredClone(m));
+  store.getSessionMirror = (id) => mirrors.get(id) ?? null;
+  store.clearSessionMirror = (id) => mirrors.delete(id);
+  const { controller } = await startSession({ store });
+  await controller.skipTask();
+  const id = controller.getState().sessionId;
+  Object.assign(store.sessions.get(id), { tasksSkipped: 0, taskIndex: 0, rev: 1 }); // the write never landed
+  const next = await createController({ config, store, deps: fakeDeps().deps });
+  const s = next.getState();
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.taskIndex, 1);
+  assert.equal(s.tasksSkipped, 1);
 });

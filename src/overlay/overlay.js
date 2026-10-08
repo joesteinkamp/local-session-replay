@@ -7,6 +7,7 @@ import {
   EDGE_MARGIN,
   MIC_LABELS,
   MIC_PASS_LEVEL,
+  canSkipTask,
   canStart,
   clamp,
   consentText,
@@ -21,10 +22,13 @@ import {
   audioNotice,
   micKind,
   parsePosition,
+  previousDownloadText,
   savedAudioText,
   snapPosition,
   taskRemainingMs,
+  taskTally,
   tasksCompleted,
+  tasksSkipped,
 } from './model.js';
 
 const POS_KEY = 'testkit:overlay-pos';
@@ -144,7 +148,7 @@ function mount(controller) {
   });
   const ui = {
     pre: freshPreflight(),
-    confirm: null, // 'stop' | 'discard'
+    confirm: null, // 'stop' | 'discard' | 'new' (start over from an undownloaded session)
     followUpFor: null, // taskIndex whose follow-up question is showing
     followUpText: '',
     exporting: false,
@@ -155,6 +159,8 @@ function mount(controller) {
     retrying: false,
     timeUp: false,
     finishedLast: false, // tester pressed Finish on the last task (this page load)
+    skipped: false, // the task change in flight came from Skip task
+    advancing: false, // a Next/Skip call is in flight
     focusNext: null, // data-fid to focus after the next render
     forceFocus: false, // focus even if focus wasn't inside the overlay
   };
@@ -301,13 +307,18 @@ function mount(controller) {
       }
     } else if (to === 'paused') {
       announce('Recording paused.');
+    } else if (to === 'stopped' && from === 'preflight') {
+      // Setup cancelled: back to the session it was started from.
+      ui.focusNext = 'new-session';
+      announce('Setup cancelled. The previous session is still here.');
     } else if (to === 'stopped' && from !== 'exporting') {
       ui.followUpFor = null;
       ui.followUpText = '';
       ui.focusNext = 'download';
       open = true;
-      announce('Session stopped. Download the session file to keep it.');
+      announce(ui.skipped ? 'Task skipped. Session complete. Download the session file to keep it.' : 'Session stopped. Download the session file to keep it.');
     }
+    ui.skipped = false;
     writeStorage('sessionStorage', OPEN_KEY, open ? '1' : '0');
   }
 
@@ -317,7 +328,8 @@ function mount(controller) {
     ui.timeUp = false;
     ui.confirm = null;
     ui.focusNext = 'next';
-    announce(taskAnnouncement());
+    announce(`${ui.skipped ? 'Task skipped. ' : ''}${taskAnnouncement()}`);
+    ui.skipped = false;
   }
 
   // ---- Actions ----
@@ -400,7 +412,12 @@ function mount(controller) {
     act(() => controller.start({ consent: true, audio }));
   }
 
-  function onNext() {
+  // The second click of a double click (event.detail 2+) may land on the next
+  // task's freshly rendered button; it is never a separate decision.
+  const repeatClick = (e) => Number(e?.detail) > 1;
+
+  function onNext(e) {
+    if (repeatClick(e)) return;
     const task = currentTask();
     if (task?.followUp && ui.followUpFor !== state.taskIndex) {
       ui.followUpFor = state.taskIndex;
@@ -414,13 +431,48 @@ function mount(controller) {
       return;
     }
     markIfLast();
-    act(() => controller.nextTask({}));
+    advanceOnce((taskIndex) => controller.nextTask({ taskIndex }));
   }
 
-  function submitFollowUp(skip) {
+  function submitFollowUp(skip, e) {
+    if (repeatClick(e)) return;
     const answer = skip ? undefined : ui.followUpText.trim();
     markIfLast();
-    act(() => controller.nextTask(answer ? { followUpAnswer: answer } : {}));
+    advanceOnce((taskIndex) => controller.nextTask(answer ? { followUpAnswer: answer, taskIndex } : { taskIndex }));
+  }
+
+  // One task change per click: a double click (or a second press before the
+  // controller answers) must not advance twice. The controller also ignores a
+  // call whose taskIndex is no longer current.
+  function advanceOnce(fn) {
+    if (ui.advancing) return;
+    ui.advancing = true;
+    const taskIndex = state.taskIndex;
+    const done = () => {
+      ui.advancing = false;
+    };
+    Promise.resolve(act(() => fn(taskIndex))).then(done, done);
+  }
+
+  // Secondary to Next: the task ends as skipped, not completed; no follow-up.
+  function onSkip(e) {
+    if (repeatClick(e)) return;
+    ui.skipped = true;
+    ui.finishedLast = false;
+    advanceOnce((taskIndex) => controller.skipTask({ taskIndex }));
+  }
+
+  // A full download (audio included) counts; a visual-only one doesn't.
+  const downloadedFully = () => Boolean(state.downloaded || (ui.exportResult && !ui.exportResult.withoutAudio));
+  const downloadedVisualOnly = () => !downloadedFully() && Boolean(state.downloadedWithoutAudio || ui.exportResult?.withoutAudio);
+
+  // From a downloaded session this goes straight to setup; otherwise ask first.
+  function onNewSession() {
+    if (downloadedFully()) {
+      act(() => controller.beginPreflight());
+      return;
+    }
+    askConfirm('new');
   }
 
   function markIfLast() {
@@ -440,7 +492,7 @@ function mount(controller) {
   function cancelConfirm() {
     const kind = ui.confirm;
     ui.confirm = null;
-    ui.focusNext = kind === 'discard' ? 'discard' : 'stop';
+    ui.focusNext = kind === 'discard' ? 'discard' : kind === 'new' ? 'new-session' : 'stop';
     render();
   }
 
@@ -515,6 +567,7 @@ function mount(controller) {
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
       state.audio?.stopAsking, state.audio?.deviceChanged, state.savedAudio, state.exportWithoutAudio,
+      state.downloaded, state.downloadedWithoutAudio, state.previousDownloadedAt, state.tasksCompleted, state.tasksSkipped,
       ui.micHelp, ui.retrying,
       state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
@@ -789,8 +842,10 @@ function mount(controller) {
     if (!ui.pre.consent) needs.push('check the consent box');
     if (audioEnabled && !ui.pre.micPassed && !ui.pre.audioSkipped) needs.push('pass the microphone check (or continue without audio)');
 
+    const previous = previousDownloadText(state.previousDownloadedAt);
     return [
       h('h2', { class: 'tk-h', text: 'Before you start' }),
+      previous ? h('p', { class: 'tk-notice', 'data-previous-download': '' }, previous) : null,
       h('p', { class: 'tk-p is-strong', id: 'tk-consent-text', text: consentText(withAudio) }),
       h(
         'label',
@@ -889,20 +944,25 @@ function mount(controller) {
       actions.push(h(
         'div',
         { class: 'tk-row' },
-        btn('Skip', { fid: 'followup-skip', onclick: () => submitFollowUp(true) }),
+        btn('Skip', { fid: 'followup-skip', onclick: (e) => submitFollowUp(true, e) }),
         btn(isLast ? 'Submit and finish' : 'Submit and continue', {
           variant: 'is-primary is-grow',
           fid: 'followup-submit',
-          onclick: () => submitFollowUp(false),
+          onclick: (e) => submitFollowUp(false, e),
         }),
       ));
     } else {
-      actions.push(h('div', { class: 'tk-row' }, btn(total ? (isLast ? 'Finish' : 'Next task') : 'Finish session', {
-        variant: 'is-primary is-grow',
-        fid: 'next',
-        disabled: paused,
-        onclick: onNext,
-      })));
+      actions.push(h(
+        'div',
+        { class: 'tk-row' },
+        canSkipTask(state) ? btn('Skip task', { fid: 'skip-task', disabled: paused, onclick: onSkip }) : null,
+        btn(total ? (isLast ? 'Finish' : 'Next task') : 'Finish session', {
+          variant: 'is-primary is-grow',
+          fid: 'next',
+          disabled: paused,
+          onclick: onNext,
+        }),
+      ));
     }
 
     if (ui.confirm === 'stop') {
@@ -988,16 +1048,18 @@ function mount(controller) {
     const done = tasksCompleted(state, { finishedLast: ui.finishedLast });
     const exporting = ui.exporting || state.phase === 'exporting';
     const res = ui.exportResult;
+    const downloaded = downloadedFully();
+    const visualOnly = downloadedVisualOnly();
     const out = [
-      h('h2', { class: 'tk-h', text: total && done >= total ? 'Session complete' : 'Session stopped' }),
+      h('h2', { class: 'tk-h', text: total && done + tasksSkipped(state) >= total ? 'Session complete' : 'Session stopped' }),
       h(
         'dl',
         { class: 'tk-meta' },
         h('dt', { text: 'Study' }), h('dd', { text: state.study || 'Untitled study' }),
         h('dt', { text: 'Duration' }),
         h('dd', {}, h('span', { 'aria-hidden': 'true', text: formatElapsed(state.elapsedMs) }), h('span', { class: 'tk-sr', text: describeDuration(state.elapsedMs) })),
-        total ? h('dt', { text: 'Tasks done' }) : null,
-        total ? h('dd', { text: `${done} of ${total}` }) : null,
+        total ? h('dt', { text: 'Tasks' }) : null,
+        total ? h('dd', { text: taskTally(state, { finishedLast: ui.finishedLast }) }) : null,
       ),
     ];
 
@@ -1012,7 +1074,10 @@ function mount(controller) {
     // exact audio-too-large copy); don't prefix it twice.
     if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
     if (!res && !exporting && !ui.exportError) {
-      out.push(h('p', { class: 'tk-p', text: 'The recording is saved in this browser until you download or discard it.' }));
+      let text = 'The recording is saved in this browser until you download or discard it.';
+      if (state.downloaded) text = 'You downloaded this session earlier. It stays in this browser until you discard it or start a new session.';
+      else if (state.downloadedWithoutAudio) text = 'You downloaded this session without its audio. The audio is saved only in this browser until you discard it.';
+      out.push(h('p', { class: 'tk-p', text }));
     }
 
     out.push(h('div', { class: 'tk-row' }, btn(
@@ -1031,6 +1096,42 @@ function mount(controller) {
       out.push(h('div', { class: 'tk-row' }, btn('Download without audio', { fid: 'download-visual', onclick: () => doExport({ withoutAudio: true }) })));
     }
 
+    if (ui.confirm === 'new') {
+      out.push(h(
+        'div',
+        { class: 'tk-card', role: 'group', 'aria-labelledby': 'tk-new-q' },
+        h('p', { class: 'tk-p is-strong', id: 'tk-new-q', text: visualOnly
+          ? 'This session’s audio wasn’t downloaded: the file you saved has no audio. Try downloading it with audio before starting a new one, or discard it.'
+          : 'This session hasn’t been downloaded. Download it before starting a new one, or discard it.' }),
+        h(
+          'div',
+          { class: 'tk-row is-end' },
+          btn('Cancel', { fid: 'confirm-cancel', onclick: cancelConfirm }),
+          btn('Discard and start new', {
+            variant: 'is-danger',
+            fid: 'confirm-discard-new',
+            onclick: () => act(() => Promise.resolve(controller.discard()).then(() => controller.beginPreflight())),
+          }),
+          btn(visualOnly ? 'Try with audio' : 'Download first', {
+            variant: 'is-primary',
+            fid: 'confirm-download',
+            onclick: () => {
+              ui.confirm = null;
+              ui.focusNext = 'new-session';
+              doExport();
+            },
+          }),
+        ),
+      ));
+    } else {
+      out.push(h('div', { class: 'tk-row' }, btn('Start new session', {
+        variant: 'is-grow',
+        fid: 'new-session',
+        disabled: exporting,
+        onclick: onNewSession,
+      })));
+    }
+
     if (ui.confirm === 'discard') {
       out.push(h(
         'div',
@@ -1038,7 +1139,7 @@ function mount(controller) {
         h('p', {
           class: 'tk-p is-strong',
           id: 'tk-discard-q',
-          text: `Delete this session from this device?${res ? '' : ' You haven’t downloaded it yet.'} This can’t be undone.`,
+          text: `Delete this session from this device?${downloaded ? '' : visualOnly ? ' Its audio hasn’t been downloaded.' : ' You haven’t downloaded it yet.'} This can’t be undone.`,
         }),
         h(
           'div',
@@ -1048,7 +1149,7 @@ function mount(controller) {
         ),
       ));
     } else {
-      out.push(h('div', { class: 'tk-row is-end' }, btn(res ? 'Finish and clear' : 'Discard', {
+      out.push(h('div', { class: 'tk-row is-end' }, btn(downloaded ? 'Finish and clear' : 'Discard', {
         variant: 'is-danger-quiet',
         fid: 'discard',
         disabled: exporting,

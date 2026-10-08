@@ -59,7 +59,7 @@ try {
   const tarball = path.join(scratch, packed.filename);
   const files = packed.files.map((f) => f.path);
   const { version } = packed;
-  for (const f of ['dist/index.js', 'dist/index.d.ts', 'dist/react.js', 'dist/react.d.ts', 'dist/script/testkit.js']) {
+  for (const f of ['dist/index.js', 'dist/index.d.ts', 'dist/react.js', 'dist/react.d.ts', 'dist/script/testkit.js', 'dist/script/testkit-core.js', 'dist/script/testkit-player-source.js']) {
     check(files.includes(f), `tarball ships ${f}`);
   }
   check(!files.some((f) => f.startsWith('examples/') || f.startsWith('src/')), 'tarball ships no examples/ or src/');

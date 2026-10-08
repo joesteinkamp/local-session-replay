@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   audioGaps, audioReport, buildSummary, buildTaskSpans, GAPS_MEANING, LOST_SEGMENT_REASON, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
-  detectRageClicks, formatDuration, formatTrailLine, overlapMs, pausedSpans, shortUrl,
+  detectRageClicks, formatDuration, formatTrailLine, overlapMs, pausedSpans, shortUrl, taskCounts, taskStatus,
 } from '../src/export/summary.js';
 
 const T = 1_760_000_000_000;
@@ -441,4 +441,48 @@ test('buildSummary: seq problems are surfaced; a dropped segment explains its ga
   assert.ok(md.includes(LOST_SEGMENT_REASON), md);
   const none = buildSummary({ session, log: [], audio: [] });
   assert.ok(none.includes('- Audio saved: No audio recorded'), none);
+});
+
+test('skipped tasks: status Skipped, never Completed, and counted separately', () => {
+  const tasks = [{ id: 't1', prompt: 'One' }, { id: 't2', prompt: 'Two' }, { id: 't3', prompt: 'Three' }];
+  const session = { tasks, startedAt: at(0), endedAt: at(30), tasksCompleted: 2, tasksSkipped: 1 };
+  const log = [
+    { ts: at(1), type: 'task-start', taskId: 't1' },
+    { ts: at(5), type: 'task-end', taskId: 't1', completed: true },
+    { ts: at(5), type: 'task-start', taskId: 't2' },
+    { ts: at(9), type: 'task-end', taskId: 't2', completed: false, reason: 'skipped' },
+    { ts: at(9), type: 'task-start', taskId: 't3' },
+    { ts: at(20), type: 'task-end', taskId: 't3', completed: true },
+    { ts: at(20), type: 'session-end', taskId: null },
+  ];
+  const spans = buildTaskSpans({ session, log });
+  assert.deepEqual(spans.map((sp) => [sp.taskId, sp.completed, sp.skipped]), [['t1', true, false], ['t2', false, true], ['t3', true, false]]);
+  assert.equal(taskStatus(spans[1]), 'Skipped');
+  assert.deepEqual(taskCounts(spans, tasks), { done: 2, total: 3, skipped: 1 });
+  const md = buildSummary({ session, log });
+  assert.ok(md.includes('- Tasks completed: 2 of 3, 1 skipped'), md);
+  assert.ok(md.slice(md.indexOf('## Task 2'), md.indexOf('## Task 3')).includes('- Status: Skipped'));
+  // No skips: the line reads as before.
+  assert.ok(buildSummary({ session, log: log.filter((e) => e.reason !== 'skipped') }).includes('- Tasks completed: 2 of 3\n'));
+});
+
+test('skipped is read from rrweb custom events too', () => {
+  const events = [
+    { type: 5, timestamp: at(1), data: { tag: 'testkit:task-start', payload: { taskId: 't1', index: 0 } } },
+    { type: 5, timestamp: at(9), data: { tag: 'testkit:task-end', payload: { taskId: 't1', index: 0, completed: false, reason: 'skipped' } } },
+  ];
+  const [span] = buildTaskSpans({ session: { tasks: [{ id: 't1' }] }, log: [], events });
+  assert.equal(span.skipped, true);
+  assert.equal(span.completed, false);
+});
+
+test('sub-threshold audio-gap entries are labelled, and "none" names the threshold', () => {
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 200 }, at(0)), '00:03 audio-gap 0.2s (under 0.5s, not counted as a gap)');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 500 }, at(0)), '00:03 audio-gap 0.5s');
+  const session = { study: 's', startedAt: at(0), endedAt: at(10), audio: { enabled: true }, tasks: [{ id: 't', prompt: 'P' }] };
+  const log = [{ ts: at(0), type: 'task-start', taskId: 't' }, { ts: at(4), type: 'audio-gap', taskId: 't', gapStart: at(4), gapMs: 400 }];
+  const audio = [{ audioSegmentId: 'a', startTs: at(0), endTs: at(10) }];
+  const md = buildSummary({ session, log, audio });
+  assert.ok(md.includes('- Audio gaps: none of 0.5s or more'), md);
+  assert.ok(md.includes('audio-gap 0.4s (under 0.5s, not counted as a gap)'), md);
 });

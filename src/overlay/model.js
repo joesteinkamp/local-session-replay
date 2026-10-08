@@ -104,6 +104,37 @@ export function tasksCompleted(state, { finishedLast = false } = {}) {
   return clamp(state.taskIndex ?? 0, 0, total);
 }
 
+// Local wall-clock time, e.g. "14:12" (or "2:12 PM", per the browser's locale).
+export function formatClock(ts) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Setup line after "Start new session" from a downloaded session. JS only knows
+// the file was handed to the browser, so the tester gets a chance to check.
+export function previousDownloadText(ts) {
+  if (!Number.isFinite(ts)) return null;
+  return `The previous session’s file was downloaded at ${formatClock(ts)}. If it isn’t in your downloads folder, choose Cancel to download it again.`;
+}
+
+// Skip task is offered only for a scripted task: free exploration has
+// nothing to skip (its Finish is Stop).
+export function canSkipTask(state) {
+  return Boolean(state?.tasks?.length && state.tasks[state.taskIndex]);
+}
+
+// Tasks the tester skipped (controller count; older controllers report none).
+export function tasksSkipped(state) {
+  const total = state.tasks?.length || 0;
+  return Number.isFinite(state.tasksSkipped) ? clamp(state.tasksSkipped, 0, total) : 0;
+}
+
+// Stopped panel tally: "2 of 3 completed, 1 skipped".
+export function taskTally(state, opts) {
+  const total = state.tasks?.length || 0;
+  const skipped = tasksSkipped(state);
+  return `${tasksCompleted(state, opts)} of ${total} completed${skipped ? `, ${skipped} skipped` : ''}`;
+}
+
 // Accumulates time spent above the pass level; the mic check passes once the
 // tester has been audible for a moment rather than on a single spike.
 export function createMicCheck(level = MIC_PASS_LEVEL, needMs = MIC_PASS_MS) {
