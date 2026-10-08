@@ -82,6 +82,9 @@ export async function createController({ config, store, deps = {} }) {
   const { createRecorder, createInteractionLog, createAudioCapture } = { ...REAL_DEPS, ...deps };
   const listeners = new Set();
   let session = null; // in-memory mirror of the SessionRecord
+  // The stopped session a "Start new session" preflight left: cancelPreflight()
+  // returns to it; start() deletes it only if it was downloaded.
+  let previous = null;
   let segmentId = null; // this page load's segment
   let recorder = null;
   let ilog = null;
@@ -112,6 +115,7 @@ export async function createController({ config, store, deps = {} }) {
       audio: { enabled: config.audio.enabled, stopAsking: false, status: 'off', error: null },
       savedAudio: null,
       exportWithoutAudio: false,
+      downloaded: false,
       otherTab: false,
       error: null,
     };
@@ -131,6 +135,7 @@ export async function createController({ config, store, deps = {} }) {
       elapsedMs: elapsedMsFor(session),
       taskElapsedMs: taskElapsedMs(),
       tasksCompleted: session?.tasksCompleted ?? 0,
+      tasksSkipped: session?.tasksSkipped ?? 0,
       audio: { ...state.audio },
     };
   }
@@ -246,7 +251,7 @@ export async function createController({ config, store, deps = {} }) {
   // Fields that must survive an immediate navigation. An IndexedDB write still
   // in flight at unload is aborted, so each persist also mirrors these to
   // localStorage synchronously; restores apply the mirror when its rev is newer.
-  const MIRRORED = ['phase', 'taskIndex', 'taskStartedAt', 'tasksCompleted', 'pausedMs', 'pausedAt', 'muted', 'endedAt', 'audio', 'lastActivityAt'];
+  const MIRRORED = ['phase', 'taskIndex', 'taskStartedAt', 'tasksCompleted', 'tasksSkipped', 'pausedMs', 'pausedAt', 'muted', 'endedAt', 'audio', 'lastActivityAt'];
 
   function mirrorFields(rec) {
     const fields = {};
@@ -579,12 +584,30 @@ export async function createController({ config, store, deps = {} }) {
   }
 
   // `completed` separates finishing a task (Next) from the span merely
-  // ending because the session was stopped.
-  function endTask({ completed }) {
+  // ending because the session was stopped; `reason: 'skipped'` marks a task
+  // the tester gave up on (Skip task).
+  function endTask({ completed, reason }) {
     const task = currentTask();
     if (!task) return;
-    log('task-end', { taskId: task.id, completed });
-    mark('testkit:task-end', { taskId: task.id, index: session.taskIndex, completed });
+    const why = reason ? { reason } : {};
+    log('task-end', { taskId: task.id, completed, ...why });
+    mark('testkit:task-end', { taskId: task.id, index: session.taskIndex, completed, ...why });
+  }
+
+  // Next and Skip: end the current task, count it, then begin the next one
+  // or stop after the last.
+  async function advance({ skipped, followUpAnswer }) {
+    if (state.phase !== 'recording') return;
+    flushInputs();
+    const task = currentTask();
+    if (!skipped && task && followUpAnswer != null && String(followUpAnswer).trim()) {
+      log('followup', { taskId: task.id, text: clip(task.followUp || ''), answer: String(followUpAnswer).trim().slice(0, MAX_ANSWER) });
+    }
+    endTask(skipped ? { completed: false, reason: 'skipped' } : { completed: true });
+    const counted = persist(skipped ? { tasksSkipped: (session.tasksSkipped || 0) + 1 } : { tasksCompleted: (session.tasksCompleted || 0) + 1 });
+    const next = session.taskIndex + 1;
+    if (next < session.tasks.length) await Promise.all([counted, beginTask(next)]);
+    else await doStop({ taskEnded: true });
   }
 
   // -------------------------------------------------------------------------
@@ -603,6 +626,7 @@ export async function createController({ config, store, deps = {} }) {
       audio: { enabled: audioFields(session.audio).enabled, stopAsking: audioFields(session.audio).stopAsking, status: 'off', error: null },
       savedAudio: null,
       exportWithoutAudio: false,
+      downloaded: !!session.exportedAt,
       otherTab: false,
       error: null,
     };
@@ -801,7 +825,9 @@ export async function createController({ config, store, deps = {} }) {
     beginPreflight() {
       return act(async () => {
         if (state.phase !== 'idle' && state.phase !== 'stopped') return;
-        // Leaving 'stopped' keeps that session's data until it's discarded.
+        // Leaving 'stopped' keeps that session's data (and testkit:last) until
+        // the new session actually starts; see start().
+        if (state.phase === 'stopped') previous = session;
         session = null;
         set({ ...idleState(), phase: 'preflight' });
       });
@@ -811,6 +837,17 @@ export async function createController({ config, store, deps = {} }) {
       return act(async () => {
         if (state.phase !== 'preflight') return;
         await releaseAudio();
+        const prev = previous;
+        previous = null;
+        // Back to the stopped session this setup was started from, if it's still there.
+        const rec = prev && withMirror(await store.getSession(prev.id).catch(() => null));
+        if (rec?.phase === 'stopped' && state.phase === 'preflight') {
+          session = rec;
+          state = stateFromSession('stopped');
+          await refreshSavedAudio();
+          emit();
+          return;
+        }
         set(idleState());
       });
     },
@@ -877,12 +914,14 @@ export async function createController({ config, store, deps = {} }) {
           pausedAt: null,
           taskStartedAt: null,
           tasksCompleted: 0,
+          tasksSkipped: 0,
         };
         // Pointer first: a navigation during the createSession await must not orphan the record.
         store.setActiveSessionId?.(session.study, session.id, now);
         store.clearLastSessionId?.(session.study);
         session.lastActivityAt = now;
         await store.createSession(session);
+        await dropPrevious();
         attachCapture();
         state = {
           ...stateFromSession('recording'),
@@ -901,19 +940,13 @@ export async function createController({ config, store, deps = {} }) {
     },
 
     nextTask({ followUpAnswer } = {}) {
-      return act(async () => {
-        if (state.phase !== 'recording') return;
-        flushInputs();
-        const task = currentTask();
-        if (task && followUpAnswer != null && String(followUpAnswer).trim()) {
-          log('followup', { taskId: task.id, text: clip(task.followUp || ''), answer: String(followUpAnswer).trim().slice(0, MAX_ANSWER) });
-        }
-        endTask({ completed: true });
-        const counted = persist({ tasksCompleted: (session.tasksCompleted || 0) + 1 });
-        const next = session.taskIndex + 1;
-        if (next < session.tasks.length) await Promise.all([counted, beginTask(next)]);
-        else await doStop({ taskEnded: true });
-      });
+      return act(() => advance({ skipped: false, followUpAnswer }));
+    },
+
+    // Like nextTask(), but the task ends as not completed (reason 'skipped')
+    // and counts toward tasksSkipped; no follow-up answer is recorded.
+    skipTask() {
+      return act(() => advance({ skipped: true }));
     },
 
     pause() {
@@ -1048,7 +1081,10 @@ export async function createController({ config, store, deps = {} }) {
           const { filename, blob, html, bytes } = await buildExport(data, { withoutAudio });
           if (!blob && typeof html !== 'string') throw new Error('Exporter returned no file');
           download(filename, blob ?? html);
-          set({ phase: 'stopped' });
+          // Not persist(): a stopped session has no mirror or active pointer to refresh.
+          session.exportedAt = Date.now();
+          await store.updateSession(session.id, { exportedAt: session.exportedAt }).catch(reportError);
+          set({ phase: 'stopped', downloaded: true });
           return { filename, bytes, withoutAudio };
         } catch (err) {
           console.warn('[TestKit] export failed', err);
@@ -1080,6 +1116,22 @@ export async function createController({ config, store, deps = {} }) {
       });
     },
   };
+
+  // Once the next session exists, the stopped one it replaced goes: deleted
+  // if it was downloaded (it would only fill storage, unreachable from the
+  // overlay), otherwise left in IndexedDB. The overlay asks before starting
+  // over from an undownloaded session, so that branch is API-only.
+  async function dropPrevious() {
+    const prev = previous;
+    previous = null;
+    if (!prev?.exportedAt) return;
+    try {
+      await store.deleteSession(prev.id);
+      store.clearSessionMirror?.(prev.id);
+    } catch (err) {
+      console.warn('[TestKit] could not delete the previous session', err);
+    }
+  }
 
   async function doStop({ taskEnded = false } = {}) {
     if (state.phase !== 'recording' && state.phase !== 'paused') return;

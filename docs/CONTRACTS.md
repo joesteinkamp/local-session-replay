@@ -59,6 +59,15 @@ import { TestKit, version } from 'local-session-replay/react'; // src/react/inde
   even if it doesn't activate; later calls, prop changes, StrictMode/HMR
   remounts, and other copies are ignored. Async activation = conditional mount.
 - **Unmount** never stops or tears down a session.
+- **`?test` snapshot.** `src/activation.js` reads the `test` param once, when
+  it is first evaluated (`typeof window`/`location` guarded; `null` on the
+  server). In query mode `isActivated()` is true when the live URL has
+  `test=1`, or has no `test` param and the snapshot was `1`, so a client
+  router redirect that drops the param before the mount (or a late `init()`)
+  still activates; one page load = one claim, however late the mount. `test=0`
+  in either the live URL or the snapshot always wins. The snapshot does not
+  affect `activate: true|false|fn`. Limit: if the package is first evaluated
+  in a lazily loaded chunk after the redirect, the snapshot has nothing to see.
 - `window.TestKit` is the debugging/automation global; `src/core/index.js`
   attaches `.controller` to it after boot.
 - The root entry never imports React. `./react` starts with `'use client'`
@@ -107,6 +116,9 @@ several prototypes on one origin never resume each other's sessions:
   `session-end {reason:'stale'}`) and moves it to `testkit:last:<study>`.
 - `localStorage['testkit:last:<study>']` = id of the most recent *stopped* session
   that hasn't been discarded, so a reload (with `?test=1`) can still export it.
+  It is the only pointer to a stopped session: the store has no session
+  listing, so a stopped session the pointer no longer names can't be reached
+  from the overlay (see "Start new session" under Controller).
 - `localStorage['testkit:mirror:<sessionId>']` = `{ id, rev, fields }`: a synchronous
   copy of the session's phase/task/pause/mute fields, written on every controller
   update. IndexedDB writes still in flight at unload are aborted, so when restoring,
@@ -134,6 +146,8 @@ SessionRecord = {
   pausedAt|null,                   // start of the current pause
   taskStartedAt|null,              // current task start, shifted forward by pauses
   tasksCompleted,                  // tasks ended via nextTask()
+  tasksSkipped,                    // tasks ended via skipTask() (absent on older records = 0)
+  exportedAt?,                     // set when exportSession() handed a file to the browser
   rev,                             // bumped on every controller update (see testkit:mirror)
   lastActivityAt,                  // refreshed on every controller update and ~15 s heartbeat
 }
@@ -177,8 +191,8 @@ LogEntry = {
   answer?,                   // followUp
   source?,                   // error/rejection: 'window'|'resource'|'console'|'promise'
   gapStart?, gapMs?,         // audio-gap: last stored audio chunk ts (else previous page's start, else session start), gap length (null if mic unavailable)
-  completed?,                // task-end: true when ended via nextTask(), false when the session was stopped mid-task
-  reason?,                   // task-end/session-end: 'stale' when boot stopped an abandoned session
+  completed?,                // task-end: true when ended via nextTask(), false when skipped or the session was stopped mid-task
+  reason?,                   // task-end: 'skipped' (skipTask()); task-end/session-end: 'stale' when boot stopped an abandoned session
 }
 type ∈ 'click'|'input'|'change'|'submit'|'nav'|'error'|'rejection'|
        'session-start'|'session-resume'|'task-start'|'task-end'|'followup'|
@@ -199,7 +213,7 @@ masked; password always; all other inputs when `mask.inputs`.
 
 Every task boundary/control is also written with `rrweb.record.addCustomEvent(tag, payload)`
 so it appears in the replay stream. Tags: `testkit:task-start {taskId,index,prompt}`,
-`testkit:task-end {taskId,index,completed}`, `testkit:pause`, `testkit:resume`,
+`testkit:task-end {taskId,index,completed,reason?}` (`reason: 'skipped'` from skipTask()), `testkit:pause`, `testkit:resume`,
 `testkit:mute`, `testkit:unmute`, `testkit:session-end`.
 
 ## Controller (`src/core/session.js` → `createController({ config, store, deps? })`)
@@ -225,6 +239,7 @@ controller.getState() → {
   savedAudio: { kind: 'recorded'|'gaps'|'none', label, gaps, gapMs, segments, unreliable, dropped } | null,
                                 // stopped only: the pre-download verdict (audioReport)
   exportWithoutAudio,           // true after the audio could not be encoded into the file
+  downloaded,                   // stopped only: SessionRecord.exportedAt is set (persisted, survives reloads)
   otherTab,                     // true when another tab is capturing this session (read-only here)
   error|null,
 }
@@ -235,6 +250,7 @@ controller.requestMic() → Promise<{ ok, error? }>   // preflight mic test
 controller.getMicLevel() → number 0..1     // RMS level, poll from rAF for the meter
 controller.start({ consent: true, audio: boolean }) // preflight → recording, task 0 begins
 controller.nextTask({ followUpAnswer? })   // ends current task; after last task → stop()
+controller.skipTask()                      // like nextTask(), but task-end {completed:false, reason:'skipped'}, counts tasksSkipped, no follow-up
 controller.pause() / controller.resume()
 controller.toggleMute()
 controller.retryMic() → Promise<{ ok, error?, persistent?, stale? }>  // recording/paused; not queued (see Audio state)
@@ -245,12 +261,32 @@ controller.discard()                       // deletes session data → idle
 ```
 
 All methods return promises and are serialized; calls in the wrong phase are
-no-ops. `beginPreflight()` is also allowed from `stopped` (the stopped session's
-data is kept until discarded). `start()` without `consent: true` sets `error`.
+no-ops. `start()` without `consent: true` sets `error`.
 On boot the controller may also land in `stopped` (restored from `testkit:last`).
-`getState()` also returns `tasksCompleted` (tasks ended via `nextTask()`, persisted)
-and `taskElapsedMs` (current task time excluding paused time) — implementing the
+`getState()` also returns `tasksCompleted` (tasks ended via `nextTask()`, persisted),
+`tasksSkipped` (tasks ended via `skipTask()`, persisted, mirrored) and
+`taskElapsedMs` (current task time excluding paused time) — implementing the
 overlay requests below.
+
+**Start new session (from `stopped`, decided 2026-10-08).** `beginPreflight()` is
+also allowed from `stopped`. The stopped session stays in IndexedDB and stays
+named by `testkit:last` throughout setup (a reload during setup shows it again);
+`cancelPreflight()` returns to it (re-read from the store) instead of `idle`.
+Once `start()` has created the new session, the previous one is **deleted if it
+was downloaded** (`exportedAt` set: it would only fill storage, unreachable),
+and **left in IndexedDB otherwise** (never deleted without a download or an
+explicit `discard()`; `start()` still clears `testkit:last`, so it is reachable
+only through IndexedDB). The overlay therefore never starts over from an
+undownloaded session without asking: its "Start new session" goes straight to
+setup when `downloaded`, else confirms with **Download first** (exports, stays on
+the stopped panel) / **Discard and start new** (`discard()` then
+`beginPreflight()`) / **Cancel**. Rejected: keeping several stopped sessions
+reachable (needs a session listing in store.js and a picker in the overlay), and
+"Start anyway (it stays saved)", which would promise data the overlay can't
+show again. The active pointer and stale logic are untouched: they only ever
+name a `recording`/`paused` session. `exportedAt` is written with
+`store.updateSession()` directly, not `persist()`, so a stopped session never
+regains a mirror.
 `state.audio.enabled` reflects the tester's choice, so a denied mic shows as
 `{ enabled: true, status: 'denied' }`. A *dismissed* prompt (Permissions API
 reports `prompt` after `NotAllowedError`) shows as `denied` with error
@@ -374,8 +410,11 @@ inline do not load in the replay (local-only over fidelity); the player shows
 how many were blocked.
 
 `src/export/summary.js` → `buildSummary({ session, log, events, audio? }) → markdown`:
-per task: status (completed only when `task-end.completed` is true; falls back
-to `session.tasksCompleted`), duration, selector-level trail, errors, signals
+per task: status (**Skipped** when `task-end.reason === 'skipped'`; Completed only
+when `task-end.completed` is true; falls back to `session.tasksCompleted`; the
+header line reads `- Tasks completed: 2 of 3, 1 skipped`, the `, N skipped` part
+only when N > 0; the player header shows `2 of 3 completed, 1 skipped` and a
+Skipped badge — both via `taskCounts()`), duration, selector-level trail, errors, signals
 (rage clicks: ≥3 clicks on the same selector within 1 s; backtracking:
 navigating back to a previously visited URL or `popstate`; long idle: ≥20 s
 without log entries while recording; time limit; audio gaps). Audio gaps are
@@ -419,6 +458,13 @@ Called once per page load after `document.body` exists and after
 id="testkit-root">` appended to `<html>` (not `<body>`, so prototype body
 re-renders can't remove it). Everything inside the shadow root is excluded from
 rrweb (`blockClass: 'testkit-block'`) and from the interaction log.
+
+Task controls: **Skip task** (`data-fid="skip-task"`, a plain secondary button
+before the primary Next task/Finish, disabled while paused, hidden during a
+follow-up question and in free exploration) calls `skipTask()`. The stopped panel
+shows "N of M completed, K skipped" and **Start new session**
+(`data-fid="new-session"`; confirm buttons `confirm-download`,
+`confirm-discard-new`, `confirm-cancel`) as described under Controller.
 
 Overlay-owned storage: `localStorage['testkit:overlay-pos']` = `{ side: 'left'|'right', y }`
 (bubble position, survives navigation); `sessionStorage['testkit:overlay-open']` =

@@ -5,6 +5,7 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
   const listeners = new Set();
   let pausedTotal = 0;
   let pausedAt = null;
+  let previous = null;
   let state = {
     phase: 'idle',
     sessionId: null,
@@ -16,6 +17,9 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
     taskStartedAt: null,
     muted: false,
     audio: { enabled: audioEnabled, status: 'off', error: null },
+    tasksCompleted: 0,
+    tasksSkipped: 0,
+    downloaded: false,
     error: null,
   };
 
@@ -37,8 +41,20 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
       listeners.add(fn);
       return () => listeners.delete(fn);
     },
-    beginPreflight: () => set({ phase: 'preflight', sessionId: 'mock-1' }),
-    cancelPreflight: () => set({ phase: 'idle', sessionId: null, audio: audio({ status: 'off' }) }),
+    // From 'stopped' the previous session comes back if setup is cancelled.
+    beginPreflight() {
+      if (state.phase !== 'idle' && state.phase !== 'stopped') return;
+      previous = state.phase === 'stopped' ? state : null;
+      set({ phase: 'preflight', sessionId: 'mock-1', downloaded: false, savedAudio: null });
+    },
+    cancelPreflight() {
+      if (previous) {
+        const back = previous;
+        previous = null;
+        return set(back);
+      }
+      return set({ phase: 'idle', sessionId: null, audio: audio({ status: 'off' }) });
+    },
     requestMic() {
       set({ audio: audio({ status: 'pending' }) });
       return new Promise((resolve) => setTimeout(() => {
@@ -54,15 +70,27 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
     getMicLevel: () => (state.audio.status === 'live' ? 0.1 + 0.15 * (1 + Math.sin(Date.now() / 120)) : 0),
     start({ audio: withAudio }) {
       const now = Date.now();
+      previous = null;
+      pausedTotal = 0;
       set({
         phase: 'recording',
         startedAt: now,
+        endedAt: null,
+        tasksCompleted: 0,
+        tasksSkipped: 0,
+        downloaded: false,
         taskIndex: 0,
         taskStartedAt: now,
         audio: audio({ enabled: withAudio && audioEnabled, status: withAudio ? 'live' : 'off' }),
       });
     },
     nextTask() {
+      state = { ...state, tasksCompleted: state.tasksCompleted + 1 };
+      if (state.taskIndex >= state.tasks.length - 1) return api.stop();
+      return set({ taskIndex: state.taskIndex + 1, taskStartedAt: Date.now() });
+    },
+    skipTask() {
+      state = { ...state, tasksSkipped: state.tasksSkipped + 1 };
       if (state.taskIndex >= state.tasks.length - 1) return api.stop();
       return set({ taskIndex: state.taskIndex + 1, taskStartedAt: Date.now() });
     },
@@ -89,20 +117,19 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
         pausedTotal += Date.now() - pausedAt;
         pausedAt = null;
       }
-      const done = state.taskIndex + (state.taskIndex >= 0 ? 1 : 0);
       const savedAudio = state.audio.enabled
         ? { kind: 'recorded', label: 'Audio recorded', gaps: 0, gapMs: 0, segments: 1, unreliable: 0, dropped: 0 }
         : { kind: 'none', label: 'No audio recorded', gaps: 0, gapMs: 0, segments: 0, unreliable: 0, dropped: 0 };
-      set({ phase: 'stopped', endedAt: Date.now(), tasksCompleted: done, savedAudio, audio: audio({ status: 'off' }) });
+      set({ phase: 'stopped', endedAt: Date.now(), savedAudio, audio: audio({ status: 'off' }) });
     },
     exportSession() {
       set({ phase: 'exporting' });
       return new Promise((resolve) => setTimeout(() => {
-        set({ phase: 'stopped' });
+        set({ phase: 'stopped', downloaded: true });
         resolve({ filename: `testkit-${study}-20261006-1412.html`, bytes: 2_431_000 });
       }, 700));
     },
-    discard: () => set({ phase: 'idle', sessionId: null, taskIndex: -1, startedAt: null, endedAt: null, taskStartedAt: null }),
+    discard: () => set({ phase: 'idle', sessionId: null, taskIndex: -1, startedAt: null, endedAt: null, taskStartedAt: null, tasksCompleted: 0, tasksSkipped: 0, downloaded: false }),
     // Test hook: jump straight into a phase.
     _set: set,
   };

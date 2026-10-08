@@ -109,7 +109,7 @@ function boundaryEntries(log, events = []) {
     const tag = ev.data?.tag;
     const p = ev.data?.payload || {};
     if (tag === 'testkit:task-start') derived.push({ ts: ev.timestamp, type: 'task-start', taskId: p.taskId ?? null, index: p.index });
-    else if (tag === 'testkit:task-end') derived.push({ ts: ev.timestamp, type: 'task-end', taskId: p.taskId ?? null, index: p.index, completed: p.completed });
+    else if (tag === 'testkit:task-end') derived.push({ ts: ev.timestamp, type: 'task-end', taskId: p.taskId ?? null, index: p.index, completed: p.completed, reason: p.reason });
   }
   return derived.length ? [...log, ...derived].sort((a, b) => a.ts - b.ts) : log;
 }
@@ -128,10 +128,11 @@ function sessionBounds({ session = {}, log = [], events = [] }) {
 }
 
 // One span per task that was started:
-// { taskId, index, task, start, end, ended, completed }.
+// { taskId, index, task, start, end, ended, completed, skipped }.
 // A task without a task-end closes at the next task-start, session-end, or the
 // last known timestamp. `ended` means a task-end was logged; `completed` means
-// the tester finished it (Next), not that Stop closed it. task-end carries
+// the tester finished it (Next), not that Stop closed it; `skipped` means the
+// tester pressed Skip task (task-end reason 'skipped'). task-end carries
 // `completed`; older data falls back to session.tasksCompleted, which counts
 // Next presses and therefore the first N ended spans.
 export function buildTaskSpans({ session = {}, log = [], events = [] }) {
@@ -140,11 +141,12 @@ export function buildTaskSpans({ session = {}, log = [], events = [] }) {
   const { end: sessionEnd } = sessionBounds({ session, log, events });
   const spans = [];
   let current = null;
-  const close = (ts, ended, completed = ended ? null : false) => {
+  const close = (ts, ended, completed = ended ? null : false, reason = null) => {
     if (!current) return;
     current.end = Math.max(current.start, ts);
     current.ended = ended;
-    current.completed = typeof completed === 'boolean' ? completed : null;
+    current.skipped = reason === 'skipped';
+    current.completed = current.skipped ? false : typeof completed === 'boolean' ? completed : null;
     spans.push(current);
     current = null;
   };
@@ -154,7 +156,7 @@ export function buildTaskSpans({ session = {}, log = [], events = [] }) {
       const index = Number.isInteger(e.index) ? e.index : tasks.findIndex((t) => t.id === e.taskId);
       current = { taskId: e.taskId ?? tasks[index]?.id ?? null, index, task: tasks[index] || null, start: e.ts, end: null, ended: false };
     } else if (e.type === 'task-end' && current && (e.taskId == null || e.taskId === current.taskId)) {
-      close(e.ts, true, e.completed);
+      close(e.ts, true, e.completed, e.reason);
     } else if (e.type === 'session-end') {
       close(e.ts, false);
     }
@@ -382,8 +384,21 @@ export function formatTrailLine(item, originTs, baseUrl) {
 // ---------- markdown ----------
 
 export function taskStatus(span) {
+  if (span.skipped) return 'Skipped';
   return span.completed ? 'Completed' : 'Not completed (session stopped)';
 }
+
+// { done, total, skipped } for "2 of 3 completed, 1 skipped"; shared by the
+// summary and the player header.
+export function taskCounts(spans, tasks = []) {
+  return {
+    done: spans.filter((s) => s.completed).length,
+    total: tasks.length || spans.length,
+    skipped: spans.filter((s) => s.skipped).length,
+  };
+}
+
+export const skippedSuffix = ({ skipped }) => (skipped ? `, ${skipped} skipped` : '');
 
 function inSpan(ts, span) {
   return ts >= span.start && ts <= span.end;
@@ -423,7 +438,9 @@ export function buildSummary({ session = {}, log = [], events = [], audio, audio
     const paused = pausedTotal ? ` (${formatDuration(end - start - pausedTotal)} active, ${formatDuration(pausedTotal)} paused)` : '';
     lines.push(`- Duration: ${formatDuration(end - start)}${paused}`);
   }
-  lines.push(`- Tasks completed: ${spans.filter((s) => s.completed).length} of ${tasks.length || spans.length}`);
+  const counts = taskCounts(spans, tasks);
+  // Kept as "Tasks completed: N of M" for readers of older summaries.
+  lines.push(`- Tasks completed: ${counts.done} of ${counts.total}${skippedSuffix(counts)}`);
   lines.push(`- Session ID: ${session.id || 'unknown'}`);
   lines.push('', 'Times in trails are mm:ss from the start of each task. Input values of "***" were masked.', '');
 

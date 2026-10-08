@@ -104,6 +104,19 @@ export function tasksCompleted(state, { finishedLast = false } = {}) {
   return clamp(state.taskIndex ?? 0, 0, total);
 }
 
+// Tasks the tester skipped (controller count; older controllers report none).
+export function tasksSkipped(state) {
+  const total = state.tasks?.length || 0;
+  return Number.isFinite(state.tasksSkipped) ? clamp(state.tasksSkipped, 0, total) : 0;
+}
+
+// Stopped panel tally: "2 of 3 completed, 1 skipped".
+export function taskTally(state, opts) {
+  const total = state.tasks?.length || 0;
+  const skipped = tasksSkipped(state);
+  return `${tasksCompleted(state, opts)} of ${total} completed${skipped ? `, ${skipped} skipped` : ''}`;
+}
+
 // Accumulates time spent above the pass level; the mic check passes once the
 // tester has been audible for a moment rather than on a single spike.
 export function createMicCheck(level = MIC_PASS_LEVEL, needMs = MIC_PASS_MS) {
