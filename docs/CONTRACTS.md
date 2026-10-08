@@ -19,7 +19,15 @@ in the same edit and say so in your report.
   page (`prefetchPlayer()` in exporter.js), so a tester who goes offline later
   can still download; a failed prefetch is silent and the export loads it again
   (and reports `Export failed: …` if that fails too). Idle pages and casual
-  viewers never load it.
+  viewers never load it. **Package build:** Chrome caches a failed dynamic
+  `import()` for the life of the page (an in-page retry makes no request), so
+  the package's `loadPlayerJs()` rejects with `{ name: 'PlayerLoadError',
+  reloadToRetry: true }`; `exportSession()` then sets `state.exportNeedsReload`
+  and `state.error` to *The replay player couldn’t load. Reload and download
+  again — your session is saved.*, and the overlay's download button becomes
+  **Reload and retry**: it reloads the current URL with `test=1` set, and the
+  stopped session restores from `testkit:last`. The script build keeps the
+  in-page retry (a re-injected script is fetched again).
 - **One time base:** every timestamp is wall-clock `Date.now()` milliseconds —
   the same clock rrweb stamps events with.
 - Bundled by esbuild (`scripts/build.mjs`). Import packages by name (`rrweb`,
@@ -254,6 +262,7 @@ controller.getState() → {
   savedAudio: { kind: 'recorded'|'gaps'|'none', label, gaps, gapMs, segments, unreliable, dropped } | null,
                                 // stopped only: the pre-download verdict (audioReport)
   exportWithoutAudio,           // true after the audio could not be encoded into the file
+  exportNeedsReload,            // package build: the player chunk failed to load; only a reload can retry
   downloaded,                   // stopped only: SessionRecord.exportedAt is set (persisted, survives reloads)
   downloadedWithoutAudio,       // stopped only: exportedWithoutAudioAt is set (the audio exists only in IndexedDB)
   previousDownloadedAt,         // preflight only: exportedAt of the stopped session this setup replaces, else null

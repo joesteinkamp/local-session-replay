@@ -866,3 +866,19 @@ test('tasksSkipped survives a navigation that aborted the IndexedDB write', asyn
   assert.equal(s.taskIndex, 1);
   assert.equal(s.tasksSkipped, 1);
 });
+
+test('a player load that can only be retried by reloading (package build) says so', async () => {
+  const { store, controller } = await startSession();
+  await controller.stop();
+  store.loadSessionData = async () => {
+    const err = new Error('The replay player could not be loaded: Failed to fetch dynamically imported module');
+    err.name = 'PlayerLoadError';
+    err.reloadToRetry = true;
+    throw err;
+  };
+  await assert.rejects(controller.exportSession(), { message: session.PLAYER_RELOAD_ERROR });
+  const s = controller.getState();
+  assert.equal(s.exportNeedsReload, true);
+  assert.equal(s.phase, 'stopped');
+  assert.equal(s.error, 'The replay player couldn’t load. Reload and download again — your session is saved.');
+});

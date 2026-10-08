@@ -45,8 +45,15 @@ const playerBundlePlugin = (mode) => ({
       mode === 'script'
         ? { path: path.join(root, 'src/export/player-script.js') }
         : { path: 'player-bundle', namespace: 'player-bundle' });
+    // Chrome caches a failed dynamic import() for the life of the page, so a
+    // failure here is marked `reloadToRetry`: only a reload can try again.
     build.onLoad({ filter: /.*/, namespace: 'player-bundle' }, () => ({
-      contents: "export const loadPlayerJs = () => import('virtual:player-text').then((m) => m.default);",
+      contents: `export const loadPlayerJs = () => import('virtual:player-text').then((m) => m.default, (cause) => {
+        const err = new Error('The replay player could not be loaded: ' + (cause && cause.message ? cause.message : cause), { cause });
+        err.name = 'PlayerLoadError';
+        err.reloadToRetry = true;
+        throw err;
+      });`,
       resolveDir: root,
     }));
     build.onResolve({ filter: /^virtual:player-text$/ }, () => ({ path: playerFile(), namespace: 'player-text' }));

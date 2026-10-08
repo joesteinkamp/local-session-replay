@@ -1251,9 +1251,10 @@ scenarios.J = async (browser) => {
 scenarios.K = async (browser) => {
   const r = {};
   const distDir = path.join(root, 'dist');
-  const context = await browser.newContext({ acceptDownloads: true });
-  await context.route(`${ORIGIN}/pkg/**`, async (route) => {
+  const net = { blockPlayer: false };
+  const routePackageApp = (context) => context.route(`${ORIGIN}/pkg/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
+    if (net.blockPlayer && /\/chunks\/testkit-player-/.test(pathname)) return route.abort('internetdisconnected');
     if (pathname.startsWith('/pkg/dist/')) {
       const file = path.join(distDir, pathname.slice('/pkg/dist/'.length));
       if (!file.startsWith(distDir) || !existsSync(file)) return route.fulfill({ status: 404, body: 'not found' });
@@ -1269,6 +1270,8 @@ scenarios.K = async (browser) => {
         </script></head><body><main><h1>Package app</h1><button id="go">Go</button></main></body></html>`,
     });
   });
+  const context = await browser.newContext({ acceptDownloads: true });
+  await routePackageApp(context);
   const page = await context.newPage();
   const playerChunks = [];
   page.on('request', (req) => /testkit-player-/.test(req.url()) && playerChunks.push(new URL(req.url()).pathname));
@@ -1300,6 +1303,54 @@ scenarios.K = async (browser) => {
   assert.ok(r.playerLoaded);
   await page.evaluate(() => window.TestKit.controller.discard());
   await context.close();
+
+  // The player chunk fails (prefetch and export): Chrome caches the failed
+  // import() for the page, so the retry reloads into the stopped session.
+  net.blockPlayer = true;
+  const ctx2 = await browser.newContext({ acceptDownloads: true });
+  await routePackageApp(ctx2);
+  const p2 = await ctx2.newPage();
+  await p2.goto(`${ORIGIN}/pkg/app/?test=1`);
+  await p2.locator('#testkit-root').waitFor({ state: 'attached', timeout: 15_000 });
+  await p2.evaluate(async () => {
+    const c = window.TestKit.controller;
+    await c.beginPreflight();
+    await c.start({ consent: true, audio: false });
+  });
+  await p2.evaluate(() => history.pushState(null, '', '/pkg/app/elsewhere'));
+  await p2.evaluate(() => window.TestKit.controller.stop());
+  await waitPhase(p2, 'stopped');
+  const stoppedId = (await state(p2)).sessionId;
+  await openPanel(p2);
+  await fid(p2, 'download').click();
+  await waitFor(p2, () => window.TestKit.controller.getState().exportNeedsReload === true, null, { what: 'exportNeedsReload' });
+  r.reloadCopy = await p2.locator('.tk-notice.is-error').first().textContent();
+  r.retryLabel = await fid(p2, 'download').textContent();
+  net.blockPlayer = false; // back online
+  // Precondition (the bug): an in-page retry still fails, with no request made.
+  let retryRequests = 0;
+  const countRetry = (req) => /testkit-player-/.test(req.url()) && retryRequests++;
+  p2.on('request', countRetry);
+  r.inPageRetry = await p2.evaluate(() => window.TestKit.controller.exportSession().then(() => 'ok', (e) => e.message));
+  p2.off('request', countRetry);
+  r.inPageRetryRequests = retryRequests;
+  assert.notEqual(r.inPageRetry, 'ok', 'an in-page retry cannot recover (cached failed import)');
+  await Promise.all([p2.waitForEvent('load'), fid(p2, 'download').click()]);
+  r.reloadedUrl = await p2.evaluate(() => location.pathname + location.search);
+  await p2.locator('#testkit-root').waitFor({ state: 'attached', timeout: 15_000 });
+  await waitPhase(p2, 'stopped');
+  r.sameSession = (await state(p2)).sessionId === stoppedId;
+  await openPanel(p2);
+  const [dl2] = await Promise.all([p2.waitForEvent('download'), fid(p2, 'download').click()]);
+  const file2 = path.join(outDir, 'K-package-after-reload.html');
+  await dl2.saveAs(file2);
+  r.afterReloadSessionId = (await readExport(file2)).session.id;
+  assert.equal(r.reloadCopy, 'The replay player couldn’t load. Reload and download again — your session is saved.');
+  assert.equal(r.retryLabel, 'Reload and retry');
+  assert.ok(r.sameSession, 'reloaded into the stopped session');
+  assert.equal(r.afterReloadSessionId, stoppedId);
+  await p2.evaluate(() => window.TestKit.controller.discard());
+  await ctx2.close();
   return r;
 };
 
@@ -1357,6 +1408,7 @@ scenarios.L = async (browser) => {
     await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).waitFor({ timeout: 10_000 });
     r.blockedError = await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).textContent();
     r.blockedPhase = (await state(page)).phase;
+    r.blockedRetryLabel = await fid(page, 'download').textContent(); // script path: in-page retry
     await page.evaluate(() => window.TestKit.controller.discard());
     await context.close();
   }
@@ -1366,6 +1418,7 @@ scenarios.L = async (browser) => {
   assert.equal(requests.filter((x) => x === 'cached-run').length, 1, 'prefetched once; the export used the cache');
   assert.match(r.blockedError, /Could not load the replay player/);
   assert.equal(r.blockedPhase, 'stopped');
+  assert.equal(r.blockedRetryLabel, 'Try download again');
   assert.equal(requests.filter((x) => x === 'blocked-run').length, 2, 'prefetch failed silently and the export retried');
   return r;
 };

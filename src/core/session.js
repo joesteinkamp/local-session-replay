@@ -34,6 +34,8 @@ export const AUDIO_SAVE_ERROR = 'Audio could not be saved';
 export const STORAGE_FULL_ERROR = 'Browser storage is full. Stop and download the session now; new activity may not be saved.';
 export const MIC_DISCONNECTED = 'Microphone disconnected';
 export const MIC_TURNED_OFF = 'Microphone turned off by the tester';
+// Package build only: a failed player chunk import can't be retried in-page.
+export const PLAYER_RELOAD_ERROR = 'The replay player couldn’t load. Reload and download again — your session is saved.';
 export { AUDIO_EXPORT_FAILED };
 
 const isQuotaError = (err) => err?.name === 'QuotaExceededError' || /quota/i.test(err?.message || '');
@@ -115,6 +117,7 @@ export async function createController({ config, store, deps = {} }) {
       audio: { enabled: config.audio.enabled, stopAsking: false, status: 'off', error: null },
       savedAudio: null,
       exportWithoutAudio: false,
+      exportNeedsReload: false,
       downloaded: false,
       downloadedWithoutAudio: false,
       previousDownloadedAt: null,   // preflight only: when the session this setup replaces was downloaded
@@ -632,6 +635,7 @@ export async function createController({ config, store, deps = {} }) {
       audio: { enabled: audioFields(session.audio).enabled, stopAsking: audioFields(session.audio).stopAsking, status: 'off', error: null },
       savedAudio: null,
       exportWithoutAudio: false,
+      exportNeedsReload: false,
       downloaded: !!session.exportedAt,
       downloadedWithoutAudio: !!session.exportedWithoutAudioAt,
       otherTab: false,
@@ -1106,8 +1110,10 @@ export async function createController({ config, store, deps = {} }) {
         } catch (err) {
           console.warn('[TestKit] export failed', err);
           const audioTooLarge = err?.name === 'AudioExportError' || (!withoutAudio && err?.message === AUDIO_EXPORT_FAILED);
-          const error = audioTooLarge ? AUDIO_EXPORT_FAILED : `Export failed: ${messageOf(err)}`;
-          set({ phase: 'stopped', error, exportWithoutAudio: audioTooLarge || state.exportWithoutAudio });
+          // Package build: the failed chunk import stays cached in this page.
+          const needsReload = !!err?.reloadToRetry;
+          const error = needsReload ? PLAYER_RELOAD_ERROR : audioTooLarge ? AUDIO_EXPORT_FAILED : `Export failed: ${messageOf(err)}`;
+          set({ phase: 'stopped', error, exportWithoutAudio: audioTooLarge || state.exportWithoutAudio, exportNeedsReload: needsReload || state.exportNeedsReload });
           return { error };
         }
       }).then((res) => {

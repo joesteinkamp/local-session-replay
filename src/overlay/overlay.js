@@ -492,7 +492,22 @@ function mount(controller) {
     render();
   }
 
+  // Package build: Chrome keeps a failed player chunk import for the life of
+  // the page, so retrying means a reload. ?test=1 brings the overlay back and
+  // the stopped session restores from testkit:last.
+  function reloadForExport() {
+    writeStorage('sessionStorage', OPEN_KEY, '1');
+    announce('Reloading the page. Your session is saved.');
+    const url = new URL(location.href);
+    url.searchParams.set('test', '1');
+    location.assign(url.href);
+  }
+
   function doExport(options) {
+    if (state.exportNeedsReload) {
+      reloadForExport();
+      return;
+    }
     if (ui.exporting) return;
     ui.exporting = true;
     ui.exportError = null;
@@ -563,7 +578,7 @@ function mount(controller) {
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
       state.audio?.stopAsking, state.audio?.deviceChanged, state.savedAudio, state.exportWithoutAudio,
-      state.downloaded, state.downloadedWithoutAudio, state.previousDownloadedAt, state.tasksCompleted, state.tasksSkipped,
+      state.downloaded, state.downloadedWithoutAudio, state.exportNeedsReload, state.previousDownloadedAt, state.tasksCompleted, state.tasksSkipped,
       ui.micHelp, ui.retrying,
       state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
@@ -1068,7 +1083,7 @@ function mount(controller) {
     if (saved) out.push(h('p', { class: `tk-notice${state.savedAudio.kind === 'recorded' ? ' is-ok' : state.savedAudio.kind === 'gaps' ? ' is-warn' : ''}`, 'data-saved-audio': state.savedAudio.kind }, saved));
     // The controller's message already starts with "Export failed:" (or is the
     // exact audio-too-large copy); don't prefix it twice.
-    if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
+    if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio || state.exportNeedsReload ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
     if (!res && !exporting && !ui.exportError) {
       let text = 'The recording is saved in this browser until you download or discard it.';
       if (state.downloaded) text = 'You downloaded this session earlier. It stays in this browser until you discard it or start a new session.';
@@ -1079,7 +1094,8 @@ function mount(controller) {
     out.push(h('div', { class: 'tk-row' }, btn(
       exporting
         ? [h('span', { class: 'tk-spinner', 'aria-hidden': 'true' }), 'Preparing file…']
-        : res ? 'Download again' : (ui.exportError ? 'Try download again' : 'Download session file'),
+        : state.exportNeedsReload ? 'Reload and retry'
+          : res ? 'Download again' : (ui.exportError ? 'Try download again' : 'Download session file'),
       {
         variant: 'is-primary is-grow',
         fid: 'download',
@@ -1088,7 +1104,7 @@ function mount(controller) {
         onclick: () => doExport(),
       },
     )));
-    if (state.exportWithoutAudio && !exporting) {
+    if (state.exportWithoutAudio && !state.exportNeedsReload && !exporting) {
       out.push(h('div', { class: 'tk-row' }, btn('Download without audio', { fid: 'download-visual', onclick: () => doExport({ withoutAudio: true }) })));
     }
 
