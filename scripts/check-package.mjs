@@ -1,7 +1,8 @@
 // Checks the package as consumers get it, not as the repo links it: packs the
 // tarball, installs it into throwaway apps outside the repo (React 18, React 19,
-// and no React at all), and imports both entries there. Needs network access
-// for the React installs. Usage: npm run check:package
+// and no React at all), imports both entries there, and type-checks both under
+// each TypeScript module resolution. Needs network access for the installs.
+// Usage: npm run check:package
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -30,6 +31,20 @@ try {
 }
 console.log(JSON.stringify(out));
 `;
+
+// Type-checked with TypeScript 5 (the last major with `node10` resolution,
+// which needs package.json `typesVersions` to see the `./react` subpath).
+const typesProbe = `
+import { init, version } from 'local-session-replay';
+import { TestKit, type TestKitConfig } from 'local-session-replay/react';
+const config: TestKitConfig = { study: 's', tasks: [{ id: 't', prompt: 'p' }] };
+export const rendered: null = TestKit(config);
+export const started: Promise<void> = init(config);
+export const v: string = version;
+// @ts-expect-error -- proves the real types loaded, not \`any\`
+TestKit({ study: 1 });
+`;
+const resolutions = [['node10', 'commonjs'], ['node16', 'node16'], ['bundler', 'esnext']];
 
 const scratch = await mkdtemp(path.join(tmpdir(), 'lsr-pack-'));
 const failures = [];
@@ -66,6 +81,21 @@ try {
     check(out.react?.startsWith(`${react}.`), `${label}: resolved react ${out.react}`);
     check(out.reactEntry?.join() === 'TestKit,version', `${label}: ./react exports { TestKit, version }`);
     check(out.ssr === '', `${label}: <TestKit /> server-renders to ''`);
+  }
+
+  const app = path.join(scratch, 'app-types');
+  await mkdir(app);
+  await writeFile(path.join(app, 'package.json'), JSON.stringify({ name: 'consumer', private: true, type: 'module' }));
+  await writeFile(path.join(app, 'probe.ts'), typesProbe);
+  run(npm, ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball, 'typescript@5'], app);
+  for (const [moduleResolution, module] of resolutions) {
+    let errors = '';
+    try {
+      run(process.execPath, ['node_modules/typescript/bin/tsc', '--noEmit', '--strict', '--ignoreDeprecations', '5.0', '--moduleResolution', moduleResolution, '--module', module, 'probe.ts'], app);
+    } catch (err) {
+      errors = `${err.stdout}`.trim().split('\n')[0];
+    }
+    check(!errors, `types resolve under moduleResolution ${moduleResolution}${errors ? `: ${errors}` : ''}`);
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });
