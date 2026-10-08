@@ -9,10 +9,12 @@
 
 import { createRecorder } from './recorder.js';
 import { createInteractionLog } from './interaction-log.js';
-import { classifyMicError, createAudioCapture, pickMimeType } from './audio.js';
+import { classifyMicError, createAudioCapture, micPermissionState, pickMimeType } from './audio.js';
 import { clip } from './selector.js';
 import { elapsedMsFor } from './store.js';
 import { exportSession as buildExport } from '../export/exporter.js';
+import { AUDIO_EXPORT_FAILED } from '../export/payload.js';
+import { audioReport } from '../export/summary.js';
 
 const TICK_MS = 1000;
 const MAX_ANSWER = 1000;
@@ -24,6 +26,24 @@ const OTHER_TAB_ERROR = 'Recording is active in another tab';
 export const STALE_MS = 30 * 60 * 1000;
 const HEARTBEAT_MS = 15_000;
 const REAL_DEPS = { createRecorder, createInteractionLog, createAudioCapture };
+
+// Failure copy (docs/CONTRACTS.md → Audio state). Supported session length is
+// 60 minutes; past that, these are what the tester sees when limits hit.
+export const AUDIO_QUOTA_ERROR = 'Browser storage is full, so audio stopped saving. The screen is still recording; stop and download the session soon.';
+export const AUDIO_SAVE_ERROR = 'Audio could not be saved';
+export const STORAGE_FULL_ERROR = 'Browser storage is full. Stop and download the session now; new activity may not be saved.';
+export const MIC_DISCONNECTED = 'Microphone disconnected';
+export const MIC_TURNED_OFF = 'Microphone turned off by the tester';
+export { AUDIO_EXPORT_FAILED };
+
+const isQuotaError = (err) => err?.name === 'QuotaExceededError' || /quota/i.test(err?.message || '');
+
+// SessionRecord.audio as written by any version: older records cleared
+// `enabled` on a confirmed denial instead of setting `stopAsking`.
+function audioFields(audio) {
+  const a = audio || {};
+  return { enabled: !!a.enabled, mime: a.mime ?? null, stopAsking: typeof a.stopAsking === 'boolean' ? a.stopAsking : a.enabled === false };
+}
 
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -89,7 +109,9 @@ export async function createController({ config, store, deps = {} }) {
       startedAt: null,
       taskStartedAt: null,
       muted: false,
-      audio: { enabled: config.audio.enabled, status: 'off', error: null },
+      audio: { enabled: config.audio.enabled, stopAsking: false, status: 'off', error: null },
+      savedAudio: null,
+      exportWithoutAudio: false,
       otherTab: false,
       error: null,
     };
@@ -164,7 +186,7 @@ export async function createController({ config, store, deps = {} }) {
     ticker = null;
   }
 
-  store.onError?.((err) => set({ error: `Storage error: ${messageOf(err)}` }));
+  store.onError?.((err) => set({ error: isQuotaError(err) ? STORAGE_FULL_ERROR : `Storage error: ${messageOf(err)}` }));
 
   // -------------------------------------------------------------------------
   // Tab ownership. A duplicated tab (or a second window) would otherwise
@@ -326,35 +348,88 @@ export async function createController({ config, store, deps = {} }) {
   // -------------------------------------------------------------------------
   // Audio
 
+  // Audio status invariant: 'live' only once the active segment has had a
+  // chunk persisted (Mute excepted: 'muted' is shown as soon as a segment
+  // runs). Any failure demotes it; Retry goes through reconnectAudio().
+  let activeAudioSeg = null; // segment the recorder is currently filling
+  let confirmedSeg = null; // last segment with a successfully persisted chunk
+  let failedAt = null; // when the current audio outage began (gap start for Retry)
+  let retrying = null;
+
   function ensureAudio() {
     if (audio) return audio;
-    audio = createAudioCapture({
+    const capture = createAudioCapture({
       bitrate: captureConfig().audio.bitrate,
       onChunk: (chunk) => {
-        if (session) store.appendAudio(session.id, chunk).catch(reportError);
+        if (!session) return;
+        const id = session.id;
+        store.appendAudio(id, chunk).then(
+          () => {
+            if (session?.id !== id || chunk.audioSegmentId !== activeAudioSeg) return;
+            confirmedSeg = chunk.audioSegmentId;
+            if (state.audio.status === 'pending' || state.audio.status === 'reconnecting') setAudio({ status: 'live', error: null });
+          },
+          (err) => {
+            // Only the segment being recorded can still be saved; a late
+            // chunk of a stopped one failing changes nothing for the tester.
+            if (session?.id !== id || chunk.audioSegmentId !== activeAudioSeg) return;
+            console.warn('[TestKit] audio chunk not saved', err);
+            audioFailed(isQuotaError(err) ? AUDIO_QUOTA_ERROR : `${AUDIO_SAVE_ERROR}: ${messageOf(err)}`);
+          },
+        );
       },
+      // A released capture (Stop, Retry's fresh stream) no longer speaks for the session.
       onProblem: (kind, err) => {
-        const error = kind === 'ended' ? 'Microphone disconnected' : `Audio recording failed: ${messageOf(err)}`;
-        audio?.stopSegment();
-        setAudio({ status: 'error', error });
-        if (session) log('audio-gap', { gapStart: Date.now(), gapMs: null, message: error });
+        if (audio !== capture) return;
+        audioFailed(kind === 'ended' ? MIC_DISCONNECTED : `Audio recording failed: ${messageOf(err)}`);
+      },
+      // Observational (see docs/audio-matrix.md): a muted track may be another
+      // app holding the mic, so it is never treated as lost audio.
+      onObserve: (kind) => {
+        if (audio !== capture) return;
+        if (kind === 'device-change') setAudio({ deviceChanged: true });
+        else setAudio({ trackMuted: kind === 'track-mute' });
       },
     });
+    audio = capture;
     return audio;
   }
 
-  const sessionWantsAudio = () =>
-    !!session && (state.phase === 'recording' || state.phase === 'paused') && !!session.audio?.enabled;
+  // Recoverable failure: stop the segment, keep visual capture running.
+  function audioFailed(error) {
+    stopAudioSegment();
+    if (!session) {
+      setAudio({ status: 'error', error });
+      return;
+    }
+    failedAt ??= Date.now();
+    setAudio({ status: 'error', error });
+    log('audio-gap', { gapStart: failedAt, gapMs: null, message: error });
+  }
+
+  function stopAudioSegment() {
+    activeAudioSeg = null;
+    return audio ? audio.stopSegment() : Promise.resolve();
+  }
+
+  // Asking for the mic is allowed: the study has audio, the tester chose it
+  // at Start, and nothing (denial, "Continue without microphone") said stop.
+  const micWanted = () =>
+    !!session && captureConfig().audio.enabled && !!session.audio?.enabled && !session.audio.stopAsking;
+
+  const sessionWantsAudio = () => (state.phase === 'recording' || state.phase === 'paused') && micWanted();
 
   /**
    * Acquires the mic. `isCurrent` lets background callers detect that the
    * lifecycle moved on (stop/discard) while the prompt was open; a stream
    * acquired for a stale caller is released unless a live session still
-   * wants it, and no status is published for it.
+   * wants it, and no status is published for it. In preflight a granted mic
+   * shows as 'live' (the level check); in a session the status stays
+   * `waiting` until a segment's first chunk is saved.
    */
-  async function acquireMic(isCurrent = () => true) {
+  async function acquireMic(isCurrent = () => true, { waiting = 'pending' } = {}) {
     const a = ensureAudio();
-    setAudio({ status: 'pending', error: null });
+    setAudio({ status: waiting, error: null });
     try {
       await a.acquire();
       if (!isCurrent()) {
@@ -365,7 +440,8 @@ export async function createController({ config, store, deps = {} }) {
         return { ok: false, stale: true };
       }
       a.setMuted(state.muted);
-      setAudio({ status: state.muted ? 'muted' : 'live', error: null });
+      const ready = state.phase === 'preflight' ? 'live' : waiting;
+      setAudio({ status: state.muted ? 'muted' : ready, error: null });
       return { ok: true };
     } catch (err) {
       if (!isCurrent()) return { ok: false, stale: true };
@@ -376,27 +452,75 @@ export async function createController({ config, store, deps = {} }) {
       const { status, error, persistent } = await classifyMicError(err);
       if (!isCurrent()) return { ok: false, stale: true };
       setAudio({ status, error });
-      return { ok: false, error: error || messageOf(err), persistent };
+      return { ok: false, status, error: error || messageOf(err), persistent };
     }
   }
 
   async function releaseAudio() {
     const a = audio;
     audio = null;
+    activeAudioSeg = null;
     if (a) await a.release();
   }
 
-  function startAudioSegment() {
-    if (!session?.audio.enabled || !audio?.isLive() || audio.isRecording()) return false;
+  function startAudioSegment({ waiting = 'pending' } = {}) {
+    if (!micWanted() || !audio?.isLive() || audio.isRecording()) return false;
     try {
-      audio.startSegment();
-      setAudio({ status: state.muted ? 'muted' : 'live', error: null });
+      activeAudioSeg = audio.startSegment();
+      failedAt = null;
+      setAudio({ status: state.muted ? 'muted' : waiting, error: null });
       return true;
     } catch (err) {
+      activeAudioSeg = null;
       setAudio({ status: 'error', error: messageOf(err) });
       return false;
     }
   }
+
+  /**
+   * The one way audio comes back once it stopped: Retry, resume() after the
+   * stream was released, and the restart after a navigation all run through
+   * here. Waits for the failed segment's stopSegment() to settle, re-acquires
+   * (dropping the result if the lifecycle moved on), starts a new segment
+   * when recording and logs the gap; the gap itself is derived from segment
+   * coverage, the log entry only supplies the reason. A denial never touches
+   * saved segments, but sets stopAsking so no later page asks again.
+   *
+   * Callers outside the serial queue (Retry, the post-navigation restart)
+   * pass `inQueue: false`: the grant can land while pause() is mid-way, so
+   * the segment start is queued behind it and re-checks the phase there.
+   */
+  async function reconnectAudio({ gapStart, isCurrent, waiting, inQueue }) {
+    await stopAudioSegment();
+    if (!isCurrent()) return { ok: false, stale: true };
+    const res = await acquireMic(isCurrent, { waiting });
+    if (!isCurrent() || res.stale) return { ok: false, stale: true };
+    if (!res.ok) {
+      const stop = deniedInSession(res);
+      if (stop) persist({ audio: { ...audioFields(session.audio), stopAsking: true } });
+      set({ audio: { ...state.audio, stopAsking: stop || state.audio.stopAsking } });
+      failedAt ??= gapStart;
+      log('audio-gap', { gapStart, gapMs: null, message: `Microphone unavailable: ${res.error}` });
+      return { ...res, persistent: stop };
+    }
+    const begin = () => {
+      if (!isCurrent()) return { ok: false, stale: true };
+      if (state.phase !== 'recording') {
+        // Paused: resume() starts the segment. Not 'live' and no longer reconnecting.
+        if (state.audio.status === 'reconnecting') setAudio({ status: state.muted ? 'muted' : 'pending' });
+        return { ok: true };
+      }
+      if (startAudioSegment({ waiting })) log('audio-gap', { gapStart, gapMs: Math.max(0, Date.now() - gapStart) });
+      return { ok: true };
+    };
+    return inQueue ? begin() : queue(begin);
+  }
+
+  // Inside a session any NotAllowedError stops the asking, whatever the
+  // Permissions API says: Firefox and Safari don't remember a one-off "Block"
+  // (state stays 'prompt'), so otherwise every navigation would re-prompt.
+  // Retry clears it when the tester asks.
+  const deniedInSession = (res) => !!res.persistent || res.status === 'denied';
 
   // After a navigation the previous page's recorder is gone. Re-acquire the
   // mic without blocking boot (Safari may re-prompt) and log the silence.
@@ -412,16 +536,32 @@ export async function createController({ config, store, deps = {} }) {
     // the gap runs from the previous page's start, else the session start.
     const segments = session.segments || [];
     const gapStart = last?.ts ?? segments[segments.length - 2]?.startedAt ?? session.startedAt;
-    const res = await acquireMic(isCurrent);
-    if (!isCurrent() || res.stale) return;
-    if (!res.ok) {
-      // Stop asking only after a real denial; a dismissed prompt is retried on the next page.
-      if (res.persistent) persist({ audio: { ...session.audio, enabled: false } });
-      log('audio-gap', { gapStart, gapMs: null, message: `Microphone unavailable: ${res.error}` });
-      return;
+    await reconnectAudio({ gapStart, isCurrent, waiting: 'pending', inQueue: false });
+  }
+
+  // A later page of a session that stopped asking after a denial: say
+  // "blocked" (with the site-settings help) rather than "off", without asking.
+  async function showRememberedDenial() {
+    if (!session?.audio?.enabled || !session.audio.stopAsking || !captureConfig().audio.enabled) return;
+    const id = session.id;
+    if ((await micPermissionState()) !== 'denied' || session?.id !== id || state.audio.status !== 'off') return;
+    setAudio({ status: 'denied', error: 'Microphone access was denied' });
+  }
+
+  // Pre-download "saved audio" verdict, from persisted segments only and
+  // through the same audioReport() the export's summary and player use.
+  async function refreshSavedAudio() {
+    if (!session || !store.loadAudioReport) return;
+    const id = session.id;
+    try {
+      const data = await store.loadAudioReport(id);
+      if (session?.id !== id) return;
+      const r = audioReport({ session: data.session, log: data.log, audio: data.audio, dropped: data.audioDropped });
+      state = { ...state, savedAudio: { kind: r.kind, label: r.label, gaps: r.gaps.length, gapMs: r.gapMs, segments: r.segments, unreliable: r.unreliable, dropped: r.dropped } };
+    } catch (err) {
+      console.warn('[TestKit] could not read saved audio', err);
+      state = { ...state, savedAudio: null };
     }
-    if (state.phase !== 'recording') return; // resume() starts the segment
-    if (startAudioSegment()) log('audio-gap', { gapStart, gapMs: Math.max(0, Date.now() - gapStart) });
   }
 
   // -------------------------------------------------------------------------
@@ -460,7 +600,9 @@ export async function createController({ config, store, deps = {} }) {
       startedAt: session.startedAt,
       taskStartedAt: phase === 'stopped' ? null : session.taskStartedAt ?? null,
       muted: !!session.muted,
-      audio: { enabled: !!session.audio?.enabled, status: 'off', error: null },
+      audio: { enabled: audioFields(session.audio).enabled, stopAsking: audioFields(session.audio).stopAsking, status: 'off', error: null },
+      savedAudio: null,
+      exportWithoutAudio: false,
       otherTab: false,
       error: null,
     };
@@ -493,9 +635,8 @@ export async function createController({ config, store, deps = {} }) {
       startCapture({ pageLoad: true });
       log('session-resume', {});
       startTicker();
-      if (captureConfig().audio.enabled && session.audio?.enabled) {
-        restartAudioAfterNavigation().catch(reportError);
-      }
+      if (micWanted()) restartAudioAfterNavigation().catch(reportError);
+      else showRememberedDenial().catch(() => {});
     } else {
       // Paused: nothing is captured until resume(), which also re-acquires the
       // mic. Release any stream a bfcache restore brought back.
@@ -531,6 +672,7 @@ export async function createController({ config, store, deps = {} }) {
     await store.flush?.();
     store.clearSessionMirror?.(rec.id);
     state = stateFromSession('stopped');
+    await refreshSavedAudio();
     emit();
   }
 
@@ -570,6 +712,7 @@ export async function createController({ config, store, deps = {} }) {
       if (rec?.phase === 'stopped' && rec.study === config.study) {
         session = rec;
         state = stateFromSession('stopped');
+        await refreshSavedAudio();
         emit();
         return;
       }
@@ -587,7 +730,7 @@ export async function createController({ config, store, deps = {} }) {
         if (session && state.phase === 'recording' && owner) {
           flushInputs();
           // Best effort: the final chunk is written only if the page lives long enough.
-          audio?.stopSegment();
+          stopAudioSegment();
           store.flush?.();
           store.spill?.();
         }
@@ -636,6 +779,7 @@ export async function createController({ config, store, deps = {} }) {
       if (rec?.phase === 'stopped') {
         session = rec;
         state = stateFromSession('stopped');
+        await refreshSavedAudio();
         emit();
       } else {
         set(idleState());
@@ -697,7 +841,7 @@ export async function createController({ config, store, deps = {} }) {
         }
         const consentAt = Date.now();
         const useAudio = config.audio.enabled && wantAudio !== false;
-        if (useAudio && !audio?.isLive()) await acquireMic(() => state.phase === 'preflight');
+        const startMic = useAudio && !audio?.isLive() ? await acquireMic(() => state.phase === 'preflight') : null;
         if (!useAudio) {
           await releaseAudio();
           setAudio({ enabled: false, status: 'off', error: null });
@@ -726,7 +870,8 @@ export async function createController({ config, store, deps = {} }) {
             consentAt,
           },
           segments: [{ segmentId, url: location.href, startedAt: now }],
-          audio: { enabled: audioOk, mime: audioOk ? pickMimeType() || null : null },
+          // enabled = the tester chose voice; stopAsking = never prompt again.
+          audio: { enabled: useAudio, mime: audioOk ? pickMimeType() || null : null, stopAsking: !!startMic && !startMic.ok && deniedInSession(startMic) },
           muted: false,
           pausedMs: 0,
           pausedAt: null,
@@ -743,8 +888,8 @@ export async function createController({ config, store, deps = {} }) {
           ...stateFromSession('recording'),
           // enabled reflects intent, so a denied mic is shown as denied rather than off.
           audio: useAudio
-            ? { enabled: true, status: audioOk ? 'live' : state.audio.status, error: audioOk ? null : state.audio.error }
-            : { enabled: false, status: 'off', error: null },
+            ? { enabled: true, stopAsking: session.audio.stopAsking, status: audioOk ? 'pending' : state.audio.status, error: audioOk ? null : state.audio.error }
+            : { enabled: false, stopAsking: false, status: 'off', error: null },
         };
         startCapture();
         log('session-start', { taskId: null });
@@ -780,10 +925,12 @@ export async function createController({ config, store, deps = {} }) {
         mark('testkit:pause', {});
         log('pause', {});
         stopCapture();
-        await audio?.stopSegment();
+        // Same-page pause holds the stream (no re-prompt on resume); the
+        // segment stops, so the mic is no longer 'live'.
+        await stopAudioSegment();
         await persist({ phase: 'paused', pausedAt: now });
         stopTicker();
-        set({ phase: 'paused' });
+        set({ phase: 'paused', audio: { ...state.audio, status: state.audio.status === 'live' ? 'pending' : state.audio.status } });
       });
     },
 
@@ -804,13 +951,11 @@ export async function createController({ config, store, deps = {} }) {
         mark('testkit:resume', {});
         log('resume', {});
         startTicker();
-        if (captureConfig().audio.enabled && session.audio?.enabled) {
+        if (micWanted()) {
           const gen = generation;
-          if (!audio?.isLive()) {
-            const res = await acquireMic(() => gen === generation && state.phase === 'recording');
-            if (!res.ok && !res.stale) log('audio-gap', { gapStart: now, gapMs: null, message: `Microphone unavailable: ${res.error}` });
-          }
-          if (gen === generation && state.phase === 'recording') startAudioSegment();
+          const isCurrent = () => gen === generation && state.phase === 'recording';
+          if (audio?.isLive()) startAudioSegment();
+          else await reconnectAudio({ gapStart: now, isCurrent, waiting: 'pending', inQueue: true });
         }
       });
     },
@@ -823,8 +968,66 @@ export async function createController({ config, store, deps = {} }) {
         log(muted ? 'mute' : 'unmute', {});
         mark(muted ? 'testkit:mute' : 'testkit:unmute', {});
         await persist({ muted });
-        const status = state.audio.status === 'live' || state.audio.status === 'muted' ? (muted ? 'muted' : 'live') : state.audio.status;
+        const s = state.audio.status;
+        let status = s;
+        if (s === 'live' || s === 'muted' || s === 'pending') {
+          const appending = !!activeAudioSeg && confirmedSeg === activeAudioSeg;
+          status = muted ? 'muted' : appending ? 'live' : 'pending';
+        }
         set({ muted, audio: { ...state.audio, status } });
+      });
+    },
+
+    /**
+     * Mid-session "Retry microphone". Not queued, like requestMic(): the
+     * permission prompt may stay open, and Stop/Discard must not wait for it
+     * (they bump `generation`, which makes this attempt stale and releases
+     * whatever it acquired). No consent re-prompt: voice consent was given at
+     * Start. Resolves { ok, error?, persistent? }; never clears saved audio.
+     */
+    retryMic() {
+      if (retrying) return retrying;
+      const active = () => !otherTab && !!session && (state.phase === 'recording' || state.phase === 'paused');
+      if (!active()) return Promise.resolve({ ok: false, error: 'No active session' });
+      if (!captureConfig().audio.enabled || !audioFields(session.audio).enabled) {
+        return Promise.resolve({ ok: false, error: 'Audio was not chosen for this session' });
+      }
+      const gen = generation;
+      const id = session.id;
+      const isCurrent = () => gen === generation && session?.id === id && active();
+      const gapStart = failedAt ?? Date.now();
+      setAudio({ status: 'reconnecting', error: null, deviceChanged: false }); // progress shows at once
+      retrying = (async () => {
+        if (session.audio.stopAsking) {
+          await persist({ audio: { ...audioFields(session.audio), stopAsking: false } });
+          set({ audio: { ...state.audio, stopAsking: false } });
+        }
+        // Always a fresh stream: after a device change the old one is still
+        // live but bound to the previous device.
+        await stopAudioSegment();
+        await releaseAudio();
+        if (!isCurrent()) return { ok: false, stale: true };
+        return reconnectAudio({ gapStart, isCurrent, waiting: 'reconnecting', inQueue: false });
+      })()
+        .catch((err) => {
+          reportError(err);
+          return { ok: false, error: messageOf(err) };
+        })
+        .finally(() => {
+          retrying = null;
+        });
+      return retrying;
+    },
+
+    /** "Continue without microphone": stop asking, release the mic, keep saved audio. */
+    continueWithoutMic() {
+      return act(async () => {
+        if (!session || (state.phase !== 'recording' && state.phase !== 'paused')) return;
+        if (audio?.isRecording()) log('audio-gap', { gapStart: Date.now(), gapMs: null, message: MIC_TURNED_OFF });
+        await persist({ audio: { ...audioFields(session.audio), stopAsking: true } });
+        await releaseAudio();
+        failedAt = null;
+        setAudio({ stopAsking: true, status: 'off', error: null });
       });
     },
 
@@ -834,21 +1037,24 @@ export async function createController({ config, store, deps = {} }) {
 
     // Resolves with { filename, bytes }; rejects on failure (the message is
     // also put in state.error), so callers must handle the rejection.
-    exportSession() {
+    // `withoutAudio` is the fallback offered (state.exportWithoutAudio) when
+    // the audio can't be encoded into the file; the visual replay still works.
+    exportSession({ withoutAudio = false } = {}) {
       return act(async () => {
         if (state.phase !== 'stopped' || !session) return { error: 'No stopped session to export' };
         set({ phase: 'exporting', error: null });
         try {
           const data = await store.loadSessionData(session.id);
-          const { filename, blob, html, bytes } = await buildExport(data);
+          const { filename, blob, html, bytes } = await buildExport(data, { withoutAudio });
           if (!blob && typeof html !== 'string') throw new Error('Exporter returned no file');
           download(filename, blob ?? html);
           set({ phase: 'stopped' });
-          return { filename, bytes };
+          return { filename, bytes, withoutAudio };
         } catch (err) {
           console.warn('[TestKit] export failed', err);
-          const error = `Export failed: ${messageOf(err)}`;
-          set({ phase: 'stopped', error });
+          const audioTooLarge = err?.name === 'AudioExportError' || (!withoutAudio && err?.message === AUDIO_EXPORT_FAILED);
+          const error = audioTooLarge ? AUDIO_EXPORT_FAILED : `Export failed: ${messageOf(err)}`;
+          set({ phase: 'stopped', error, exportWithoutAudio: audioTooLarge || state.exportWithoutAudio });
           return { error };
         }
       }).then((res) => {
@@ -897,6 +1103,8 @@ export async function createController({ config, store, deps = {} }) {
     store.clearActiveSessionId?.(session.study);
     // IndexedDB now holds the final record; the mirror would only go stale.
     store.clearSessionMirror?.(session.id);
+    failedAt = null;
+    await refreshSavedAudio();
     set({ phase: 'stopped', taskStartedAt: null, audio: { ...state.audio, status: 'off' } });
   }
 

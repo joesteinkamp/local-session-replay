@@ -185,13 +185,17 @@ function uncovered(start, end, covered, minMs) {
   return out;
 }
 
-// Recording time (minus pauses) with no audio segment, while audio was on.
-// With `audio` segments this is computed from coverage, so silent failures
-// show up even when no audio-gap entry was logged; each gap borrows the
-// reason from an overlapping audio-gap entry. Without segments it falls back
-// to the logged entries. Returns [{ start, end, durationMs, reason }].
-export function audioGaps({ session = {}, log = [], audio, start, end, pauses = [], minMs = AUDIO_GAP_MIN_MS }) {
-  if (session.audio?.enabled === false) return [];
+// Recording time (minus pauses) with no audio segment. With `audio` segments
+// this is computed from coverage, so silent failures show up even when no
+// audio-gap entry was logged; each gap borrows the reason from an overlapping
+// audio-gap entry (or a segment dropped as unplayable). Without segments it
+// falls back to the logged entries. Saved segments always count, whatever
+// `session.audio.enabled` says: older sessions set it to false on a later
+// denial even though earlier pages had audio. Returns
+// [{ start, end, durationMs, reason }].
+export function audioGaps({ session = {}, log = [], audio, dropped = [], start, end, pauses = [], minMs = AUDIO_GAP_MIN_MS }) {
+  const hasSegments = Array.isArray(audio) && audio.length > 0;
+  if (!hasSegments && session.audio?.enabled === false) return [];
   const logged = log.filter((e) => e.type === 'audio-gap').map((e) => {
     const ms = gapMsOf(e);
     const from = Number.isFinite(e.gapStart) ? e.gapStart : ms !== null ? e.ts - ms : e.ts;
@@ -200,11 +204,47 @@ export function audioGaps({ session = {}, log = [], audio, start, end, pauses = 
   if (!Array.isArray(audio) || !Number.isFinite(start) || !Number.isFinite(end)) {
     return logged.map(({ ts, ...g }) => g);
   }
+  const lost = (dropped || []).filter((d) => Number.isFinite(d.startTs) && Number.isFinite(d.endTs))
+    .map((d) => ({ start: d.startTs, end: d.endTs, ts: d.endTs, reason: LOST_SEGMENT_REASON }));
+  const reasons = [...logged, ...lost];
   const covered = [...pauses, ...audio.filter((a) => Number.isFinite(a.startTs) && Number.isFinite(a.endTs)).map((a) => ({ start: a.startTs, end: a.endTs }))];
   return uncovered(start, end, covered, minMs).map((g) => {
-    const why = logged.find((l) => l.reason && l.start <= g.end && Math.max(l.end, l.ts) >= g.start);
+    const why = reasons.find((l) => l.reason && l.start <= g.end && Math.max(l.end, l.ts) >= g.start);
     return { ...g, durationMs: g.end - g.start, reason: why?.reason || null };
   });
+}
+
+export const LOST_SEGMENT_REASON = 'Audio segment lost (its first chunk was not saved)';
+
+// The one "what audio was saved" verdict, shared by the overlay's
+// pre-download line, the summary and the player so they can't disagree.
+export const SAVED_AUDIO = {
+  recorded: 'Audio recorded',
+  gaps: 'Audio recorded with gaps',
+  none: 'No audio recorded',
+};
+export const GAPS_MEANING = 'Gaps are stretches where the microphone was not capturing, not places where speech was hard to hear.';
+
+/**
+ * `audio` = grouped segments (store.groupAudioChunks), `dropped` = segments
+ * lost entirely. Returns { kind: 'recorded'|'gaps'|'none', label, gaps,
+ * gapMs, segments, unreliable, dropped }. Based only on persisted segments.
+ */
+export function audioReport({ session = {}, log = [], events = [], audio = [], dropped = [] } = {}) {
+  const segments = Array.isArray(audio) ? audio : [];
+  const { start, end } = sessionBounds({ session, log, events });
+  const pauses = pausedSpans(log, end ?? Infinity);
+  const gaps = segments.length ? audioGaps({ session, log, audio: segments, dropped, start, end, pauses }) : [];
+  const kind = !segments.length ? 'none' : gaps.length ? 'gaps' : 'recorded';
+  return {
+    kind,
+    label: SAVED_AUDIO[kind],
+    gaps,
+    gapMs: gaps.reduce((sum, g) => sum + (g.durationMs || 0), 0),
+    segments: segments.length,
+    unreliable: segments.filter((s) => Array.isArray(s.seqGaps) && s.seqGaps.length).length,
+    dropped: (dropped || []).length,
+  };
 }
 
 // ---------- signals ----------
@@ -358,7 +398,7 @@ function sessionSignals({ session, log, events, spans }) {
 
 // `audio` is the segment list ({ startTs, endTs }); when given, audio gaps are
 // derived from coverage rather than only from logged audio-gap entries.
-export function buildSummary({ session = {}, log = [], events = [], audio } = {}) {
+export function buildSummary({ session = {}, log = [], events = [], audio, audioDropped = [] } = {}) {
   const meta = session.meta || {};
   const baseUrl = meta.prototypeUrl || session.segments?.[0]?.url || null;
   const spans = buildTaskSpans({ session, log, events });
@@ -366,7 +406,10 @@ export function buildSummary({ session = {}, log = [], events = [], audio } = {}
   const pausedTotal = start !== null && end !== null ? overlapMs(start, end, pauses) : 0;
   const tasks = session.tasks || session.config?.tasks || [];
   const viewport = meta.viewport ? `${meta.viewport.w}×${meta.viewport.h}` : 'unknown';
-  const gaps = audioGaps({ session, log, audio, start, end, pauses });
+  // With segments given, gaps come from the same audioReport() the overlay
+  // and the player use; older callers without segments use the logged entries.
+  const report = Array.isArray(audio) ? audioReport({ session, log, events, audio, dropped: audioDropped }) : null;
+  const gaps = report ? report.gaps : audioGaps({ session, log, start, end, pauses });
   const lines = [];
 
   lines.push(`# TestKit session: ${session.study || 'untitled-study'}`, '');
@@ -456,12 +499,22 @@ export function buildSummary({ session = {}, log = [], events = [], audio } = {}
   const outsideErrors = outside.filter((e) => ERROR_TYPES.has(e.type));
   lines.push(`- Errors outside tasks: ${outsideErrors.length || 'none'}`);
   for (const e of outsideErrors) lines.push(`  - ${formatTimestamp(e.ts)} ${e.type}: ${e.message || 'unknown error'} on ${shortUrl(e.url, baseUrl) || 'unknown page'}`);
-  if (session.audio?.enabled === false) lines.push('- Audio: not recorded');
-  else {
+  const hasSegments = Array.isArray(audio) && audio.length > 0;
+  if (report) {
+    lines.push(`- Audio saved: ${report.label}${report.kind === 'gaps' ? ` (${GAPS_MEANING})` : ''}`);
+  }
+  if (!hasSegments && session.audio?.enabled === false) {
+    if (!Array.isArray(audio)) lines.push('- Audio: not recorded');
+  } else if (Array.isArray(audio) && !hasSegments) {
+    if (audioDropped.length) lines.push(`- Lost audio segments: ${audioDropped.length} (first chunk not saved; unplayable)`);
+  } else {
     const gapTotal = gaps.reduce((sum, g) => sum + (g.durationMs || 0), 0);
     const unmeasured = gaps.filter((g) => g.durationMs === null).length;
     const detail = `${(gapTotal / 1000).toFixed(1)}s total${unmeasured ? `, ${unmeasured} without a measured length` : ''}; mm:ss from session start`;
     if (Array.isArray(audio)) lines.push(`- Audio segments: ${audio.length}`);
+    const unreliable = hasSegments ? audio.filter((a) => Array.isArray(a.seqGaps) && a.seqGaps.length) : [];
+    if (unreliable.length) lines.push(`- Unreliable audio segments: ${unreliable.length} (missing chunks; playback may stop early)`);
+    if (audioDropped.length) lines.push(`- Lost audio segments: ${audioDropped.length} (first chunk not saved; unplayable)`);
     lines.push(`- Audio gaps: ${gaps.length ? `${gaps.length} (${detail})` : 'none'}`);
     for (const g of gaps.slice(0, 20)) {
       const len = g.durationMs === null ? 'unknown length' : `${(g.durationMs / 1000).toFixed(1)}s`;

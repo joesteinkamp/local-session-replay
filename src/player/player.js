@@ -4,7 +4,7 @@ import rrwebPlayer from 'rrweb-player';
 import RRWEB_CSS from 'rrweb-player/dist/style.css';
 import PLAYER_CSS from './player.css';
 import {
-  audioGaps, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
+  GAPS_MEANING, audioReport, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
 } from '../export/summary.js';
 import { buildFilename } from '../export/html.js';
 import { findRemoteAssets } from './assets.js';
@@ -12,6 +12,11 @@ import { findRemoteAssets } from './assets.js';
 const SEEK_STEP_MS = 5000;
 const SEEK_PAGE_MS = 30000;
 const DRIFT_TOLERANCE_S = 0.3;
+// play() takes a moment to produce sound while the replayer keeps going, so
+// the element starts behind by that latency × speed (measured ≈250 ms at 1×
+// in Chrome). Once it is actually playing, it gets one tighter correction.
+const SETTLE_TOLERANCE_S = 0.08;
+const SETTLE_DELAY_MS = 250;
 // Chrome and Firefox mute media above 4× (and speech is unintelligible anyway).
 const MAX_AUDIBLE_RATE = 4;
 const MIN_SKIPPABLE_PAUSE_MS = 1500;
@@ -69,6 +74,8 @@ function readPayload() {
     events: Array.isArray(payload.events) ? payload.events : [],
     log: Array.isArray(payload.log) ? payload.log : [],
     audio: Array.isArray(payload.audio) ? payload.audio : [],
+    audioDropped: Array.isArray(payload.audioDropped) ? payload.audioDropped : [],
+    omittedAudio: Array.isArray(payload.omittedAudio) ? payload.omittedAudio : [],
   };
 }
 
@@ -94,7 +101,10 @@ function createAudioSync(segments, { onStatus }) {
 
   const items = segments.map((seg, i) => {
     const el = h('audio', { preload: 'auto' });
-    const item = { seg, el, index: i, ready: false, failed: false };
+    const item = { seg, el, index: i, ready: false, failed: false, settleAt: null };
+    el.addEventListener('playing', () => {
+      item.settleAt = performance.now() + SETTLE_DELAY_MS;
+    });
     // MediaRecorder WebM has no duration/cues; seeking far forward once makes
     // the browser index the file so later seeks land correctly.
     el.addEventListener('loadedmetadata', () => {
@@ -140,7 +150,7 @@ function createAudioSync(segments, { onStatus }) {
       status('gap', 'No audio at this point (gap between recordings)');
       return;
     }
-    const label = `segment ${it.index + 1} of ${items.length}`;
+    const label = `segment ${it.index + 1} of ${items.length}${it.seg.seqGaps?.length ? ', missing chunks' : ''}`;
     if (it.failed) {
       status(`fail-${it.index}`, `Audio ${label} can't be played in this browser (${it.seg.mime || 'unknown format'})`, true);
       return;
@@ -168,8 +178,13 @@ function createAudioSync(segments, { onStatus }) {
       status(`rate-${speed}`, `Audio can't play at ${speed}×`, true);
       return;
     }
+    const drift = Math.abs(it.el.currentTime - target);
     if (it.el.ended && target < it.el.duration - DRIFT_TOLERANCE_S) it.el.currentTime = target;
-    else if (!it.el.seeking && Math.abs(it.el.currentTime - target) > DRIFT_TOLERANCE_S) it.el.currentTime = target;
+    else if (!it.el.seeking && drift > DRIFT_TOLERANCE_S) it.el.currentTime = target;
+    else if (!it.el.seeking && !it.el.paused && it.settleAt !== null && performance.now() >= it.settleAt) {
+      it.settleAt = null;
+      if (drift > SETTLE_TOLERANCE_S) it.el.currentTime = target;
+    }
     it.el.volume = volume;
     it.el.muted = muted;
     if (it.el.paused && !it.el.ended) {
@@ -387,7 +402,10 @@ function mount() {
   const { session, events, log, audio } = data;
   const meta = session.meta || {};
   const tasks = session.tasks || session.config?.tasks || [];
-  const summary = data.summaryMarkdown || buildSummary({ session, log, events, audio });
+  // A without-audio export keeps the saved segments' metadata: verdict and
+  // gap marks describe what was recorded, not what this file carries.
+  const savedSegments = data.audioOmitted ? data.omittedAudio : audio;
+  const summary = data.summaryMarkdown || buildSummary({ session, log, events, audio: savedSegments, audioDropped: data.audioDropped });
   const replayable = events.length >= 2 && events.some((e) => e.type === RRWEB_FULL_SNAPSHOT);
   const t0 = replayable ? events[0].timestamp : session.startedAt;
   const t1 = replayable ? events[events.length - 1].timestamp : session.endedAt ?? t0;
@@ -401,7 +419,10 @@ function mount() {
     return { ...span, n, prompt, label: `Task ${n}: ${prompt}`, short: `${n}. ${prompt}` };
   });
   const errors = log.filter((e) => e.type === 'error' || e.type === 'rejection');
-  const gaps = audioGaps({ session, log, audio, start: sessionStart, end: sessionEnd, pauses });
+  // Same verdict and gap list as the summary and the overlay's pre-download line.
+  const saved = audioReport({ session, log, events, audio: savedSegments, dropped: data.audioDropped });
+  const { gaps } = saved;
+  const savedText = data.audioOmitted ? `${saved.label} — left out of this file (too large to export)` : saved.label;
 
   // ---- header ----
   const toast = createToast();
@@ -448,6 +469,7 @@ function mount() {
         metaItem('Started', formatLocal(sessionStart)),
         metaItem('Duration', durationText),
         metaItem('Tasks', `${spans.filter((s) => s.completed).length} of ${tasks.length || spans.length} completed`),
+        metaItem('Audio', h('span', { title: saved.kind === 'gaps' ? GAPS_MEANING : null }, savedText)),
         metaItem('Browser', describeBrowser(meta.userAgent)),
         metaItem('Viewport', meta.viewport ? `${meta.viewport.w} × ${meta.viewport.h}` : 'unknown'),
         metaItem('Commit', meta.commitSha ? h('code', {}, meta.commitSha) : 'unknown'),
@@ -635,7 +657,7 @@ function mount() {
       enableBtn.hidden = true;
     });
   } else {
-    audioStatus.textContent = session.audio?.enabled === false ? 'Not recorded for this session' : 'No audio in this export';
+    audioStatus.textContent = data.audioOmitted ? 'Audio was left out of this file (too large to export)' : saved.label;
   }
   skipBox.addEventListener('change', () => { skipPauses = skipBox.checked; });
 

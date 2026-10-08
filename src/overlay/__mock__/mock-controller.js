@@ -75,6 +75,14 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
       pausedAt = null;
       set({ phase: 'recording' });
     },
+    retryMic() {
+      set({ audio: audio({ status: 'reconnecting', error: null }) });
+      return new Promise((resolve) => setTimeout(() => {
+        set({ audio: audio({ status: state.muted ? 'muted' : 'live', stopAsking: false }) });
+        resolve({ ok: true });
+      }, 400));
+    },
+    continueWithoutMic: () => set({ audio: audio({ status: 'off', stopAsking: true, error: null }) }),
     toggleMute: () => set({ muted: !state.muted, audio: audio({ status: state.muted ? 'live' : 'muted' }) }),
     stop() {
       if (pausedAt) {
@@ -82,7 +90,10 @@ export function createMockController({ study = 'grid-filters-v2', tasks = [], au
         pausedAt = null;
       }
       const done = state.taskIndex + (state.taskIndex >= 0 ? 1 : 0);
-      set({ phase: 'stopped', endedAt: Date.now(), tasksCompleted: done, audio: audio({ status: 'off' }) });
+      const savedAudio = state.audio.enabled
+        ? { kind: 'recorded', label: 'Audio recorded', gaps: 0, gapMs: 0, segments: 1, unreliable: 0, dropped: 0 }
+        : { kind: 'none', label: 'No audio recorded', gaps: 0, gapMs: 0, segments: 0, unreliable: 0, dropped: 0 };
+      set({ phase: 'stopped', endedAt: Date.now(), tasksCompleted: done, savedAudio, audio: audio({ status: 'off' }) });
     },
     exportSession() {
       set({ phase: 'exporting' });
