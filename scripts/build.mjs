@@ -1,5 +1,6 @@
 // Builds TestKit into public/ (the GitHub Pages artifact) and dist/ (the npm
-// package: an ES module entry plus copies of the script-tag files).
+// package: ES module entries `.` and `./react`, plus copies of the script-tag
+// files).
 import * as esbuild from 'esbuild';
 import { cp, mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -57,19 +58,25 @@ async function buildAll() {
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/core/index.js')], outfile: path.join(out, 'testkit-core.js'), plugins: [playerBundlePlugin] });
   await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/loader.js')], outfile: path.join(out, 'testkit.js') });
   await assertAscii([path.join(out, 'testkit.js'), path.join(out, 'testkit-core.js'), path.join(out, 'testkit-player.js')]);
-  // Package entry: splitting turns the dynamic import of the recorder into its
-  // own chunk, which the host's bundler then splits again.
+  // Package entries (`.` and `./react`): splitting turns the dynamic import of
+  // the recorder into its own chunk, shared by both entries, which the host's
+  // bundler then splits again. React stays a bare import the host resolves.
   await rm(dist, { recursive: true, force: true });
   await esbuild.build({
     ...common,
-    entryPoints: [path.join(root, 'src/index.js')],
+    entryPoints: [
+      { in: path.join(root, 'src/index.js'), out: 'index' },
+      { in: path.join(root, 'src/react/index.js'), out: 'react' },
+    ],
     outdir: dist,
     format: 'esm',
     splitting: true,
     chunkNames: 'chunks/[name]-[hash]',
+    external: ['react', 'react-dom'],
     plugins: [playerBundlePlugin],
   });
   await cp(path.join(root, 'src/index.d.ts'), path.join(dist, 'index.d.ts'));
+  await cp(path.join(root, 'src/react.d.ts'), path.join(dist, 'react.d.ts'));
   await cp(out, path.join(dist, 'script'), { recursive: true });
   const esm = (await readdir(dist, { recursive: true })).filter((f) => f.endsWith('.js') && !f.startsWith('script'));
   await assertAscii(esm.map((f) => path.join(dist, f)));

@@ -9,6 +9,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
     "./script/*": "./dist/script/*",
     "./package.json": "./package.json"
   },
@@ -26,10 +30,24 @@
     "test": "node --test 'test/*.test.js'",
     "prepare": "npm run build"
   },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
   "license": "MIT",
   "devDependencies": {
+    "esbuild": "0.28.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "rrweb": "2.1.7",
-    "rrweb-player": "2.1.7",
-    "esbuild": "0.28.2"
+    "rrweb-player": "2.1.7"
   }
 }
