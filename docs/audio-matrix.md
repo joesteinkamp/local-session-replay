@@ -48,11 +48,11 @@ playing `<audio>` (via `captureStream()` and an analyser) and compared with the
 replayer clock (recording-timeline time). Readings taken in the first second
 after a seek or rate change don't count (plan: "after playback settles ≤ 1 s").
 
-| Speed | Settled beeps | Max abs error | Budget 300 ms |
+| Speed | Settled beeps per run | Max abs error (2 full runs) | Budget 300 ms |
 | --- | --- | --- | --- |
-| 1× | 10 | 68 ms | **pass** |
-| 2× | 9 | 114 ms | **pass** |
-| 4× | 7 | 207 ms | **pass** |
+| 1× | 10 | 68–69 ms | **pass** |
+| 2× | 9 | 114–136 ms | **pass** |
+| 4× | 7–8 | 196–207 ms | **pass** |
 
 Breakdown:
 
@@ -67,7 +67,7 @@ Breakdown:
   (`SETTLE_TOLERANCE_S`). That brought 1× down to ≤ 68 ms. The 2× and 4×
   errors scale with speed for the same reason. They stay inside the budget.
 - **`currentTime` alignment** (scenario A, 5 segments, begin/middle/end at
-  1×/2×/4×): max |drift| 230 ms across runs, mostly −40…−60 ms at 1×,
+  1×/2×/4×): max |drift| 230–249 ms across runs, mostly −40…−60 ms at 1×,
   −100…−140 ms at 2× and −180…−260 ms at 4×.
 
 ### Navigation and transition gaps (not scored against the 300 ms budget)

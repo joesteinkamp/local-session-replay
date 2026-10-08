@@ -278,7 +278,9 @@ locally stopped track never fires `ended`); `onProblem('error', err)` on recorde
    recording (paused: `resume()` starts it), and log `audio-gap` — `gapMs` on
    success, `null` + `message` on failure. The gap shown to people comes from
    segment coverage; the log entry only supplies the reason. A denial never
-   touches saved segments; a confirmed one sets `stopAsking`. `retryMic()` is not
+   touches saved segments; a confirmed one sets `stopAsking`. `retryMic()` always
+   releases the current stream first (after a `devicechange` the old one is
+   still live but bound to the previous device), is not
    queued (the prompt can stay open; Stop/Discard bump `generation` and win),
    never re-shows consent, and is a no-op if the tester declined voice at Start.
 4. **Pause policy.** Same-page pause stops the segment but holds the stream (no

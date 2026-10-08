@@ -358,7 +358,7 @@ export async function createController({ config, store, deps = {} }) {
 
   function ensureAudio() {
     if (audio) return audio;
-    audio = createAudioCapture({
+    const capture = createAudioCapture({
       bitrate: captureConfig().audio.bitrate,
       onChunk: (chunk) => {
         if (!session) return;
@@ -378,16 +378,20 @@ export async function createController({ config, store, deps = {} }) {
           },
         );
       },
+      // A released capture (Stop, Retry's fresh stream) no longer speaks for the session.
       onProblem: (kind, err) => {
+        if (audio !== capture) return;
         audioFailed(kind === 'ended' ? MIC_DISCONNECTED : `Audio recording failed: ${messageOf(err)}`);
       },
       // Observational (see docs/audio-matrix.md): a muted track may be another
       // app holding the mic, so it is never treated as lost audio.
       onObserve: (kind) => {
+        if (audio !== capture) return;
         if (kind === 'device-change') setAudio({ deviceChanged: true });
         else setAudio({ trackMuted: kind === 'track-mute' });
       },
     });
+    audio = capture;
     return audio;
   }
 
@@ -979,6 +983,11 @@ export async function createController({ config, store, deps = {} }) {
           await persist({ audio: { ...audioFields(session.audio), stopAsking: false } });
           set({ audio: { ...state.audio, stopAsking: false } });
         }
+        // Always a fresh stream: after a device change the old one is still
+        // live but bound to the previous device.
+        await stopAudioSegment();
+        await releaseAudio();
+        if (!isCurrent()) return { ok: false, stale: true };
         return reconnectAudio({ gapStart, isCurrent, waiting: 'reconnecting' });
       })()
         .catch((err) => {

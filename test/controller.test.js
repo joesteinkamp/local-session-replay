@@ -608,3 +608,23 @@ test('export: audio too large to encode → exact copy, Download without audio o
     globalThis.setTimeout = realSetTimeout;
   }
 });
+
+test('after a devicechange, Retry swaps to a fresh stream; events from the old capture are ignored', async () => {
+  const { seen, controller } = await startSession({ audio: true });
+  seen.capture.emit();
+  await settle();
+  seen.observe('device-change');
+  assert.equal(controller.getState().audio.deviceChanged, true);
+  const old = seen.capture;
+  const oldProblem = seen.problem;
+  const releases = seen.releases;
+  assert.equal((await controller.retryMic()).ok, true);
+  assert.notEqual(seen.capture, old, 'new capture');
+  assert.equal(seen.releases, releases + 1, 'old stream released');
+  assert.equal(controller.getState().audio.deviceChanged, false);
+  oldProblem('ended'); // the released stream's tracks ending must not demote the new one
+  seen.capture.emit();
+  await settle();
+  assert.equal(controller.getState().audio.status, 'live');
+  await controller.stop();
+});
