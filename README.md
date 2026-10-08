@@ -174,7 +174,7 @@ mixed, the first one to run wins.
    download or discard it first.
 
 Reloads, crashes, and page navigations resume the same session automatically.
-Expect 1–2 s of silence in the audio at each page load (marked on the timeline).
+Expect a short silence in the audio at each page load, typically under a second (longer on slow pages). Gaps of 0.5 s or more are marked on the timeline and counted in the summary; shorter ones appear in the trail as not counted.
 A session left idle for more than 30 minutes is not resumed: it is stopped and
 stays available to download from `?test=1`.
 

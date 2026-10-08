@@ -445,7 +445,9 @@ Skipped badge — both via `taskCounts()`), duration, selector-level trail, erro
 navigating back to a previously visited URL or `popstate`; long idle: ≥20 s
 without log entries while recording; time limit; audio gaps). Audio gaps are
 recording time outside pauses not covered by any audio segment (≥0.5 s),
-computed from `audio` when given, else from `audio-gap` log entries.
+computed from `audio` when given, else from `audio-gap` log entries. With none,
+the line reads `- Audio gaps: none of 0.5s or more`; a trail `audio-gap` entry
+shorter than that is suffixed `(under 0.5s, not counted as a gap)`.
 `audioReport({ session, log, events, audio, dropped }) → { kind, label, gaps, … }`
 is the single saved-audio verdict — **Audio recorded** / **Audio recorded with
 gaps** / **No audio recorded** — used by the summary (`- Audio saved:` line), the

@@ -374,7 +374,10 @@ export function formatTrailLine(item, originTs, baseUrl) {
       return `${t} ${item.type} ${quote(item.message || 'unknown error', 120)}`;
     case 'audio-gap': {
       const gap = gapMsOf(item);
-      return `${t} audio-gap${gap !== null ? ` ${(gap / 1000).toFixed(1)}s` : ''}${item.message ? ` ${quote(item.message, 120)}` : ''}`;
+      // The "Audio gaps" line counts only gaps of AUDIO_GAP_MIN_MS or more;
+      // say so here, or a short page-load gap looks like a missed one.
+      const below = gap !== null && gap < AUDIO_GAP_MIN_MS ? ' (under 0.5s, not counted as a gap)' : '';
+      return `${t} audio-gap${gap !== null ? ` ${(gap / 1000).toFixed(1)}s` : ''}${below}${item.message ? ` ${quote(item.message, 120)}` : ''}`;
     }
     default:
       return `${t} ${item.type}`;
@@ -532,7 +535,7 @@ export function buildSummary({ session = {}, log = [], events = [], audio, audio
     const unreliable = hasSegments ? audio.filter((a) => Array.isArray(a.seqGaps) && a.seqGaps.length) : [];
     if (unreliable.length) lines.push(`- Unreliable audio segments: ${unreliable.length} (missing chunks; playback may stop early)`);
     if (audioDropped.length) lines.push(`- Lost audio segments: ${audioDropped.length} (first chunk not saved; unplayable)`);
-    lines.push(`- Audio gaps: ${gaps.length ? `${gaps.length} (${detail})` : 'none'}`);
+    lines.push(`- Audio gaps: ${gaps.length ? `${gaps.length} (${detail})` : 'none of 0.5s or more'}`);
     for (const g of gaps.slice(0, 20)) {
       const len = g.durationMs === null ? 'unknown length' : `${(g.durationMs / 1000).toFixed(1)}s`;
       lines.push(`  - ${clock(g.start - start)}–${clock(g.end - start)} (${len})${g.reason ? ` ${g.reason}` : ''}`);

@@ -475,3 +475,14 @@ test('skipped is read from rrweb custom events too', () => {
   assert.equal(span.skipped, true);
   assert.equal(span.completed, false);
 });
+
+test('sub-threshold audio-gap entries are labelled, and "none" names the threshold', () => {
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 200 }, at(0)), '00:03 audio-gap 0.2s (under 0.5s, not counted as a gap)');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 500 }, at(0)), '00:03 audio-gap 0.5s');
+  const session = { study: 's', startedAt: at(0), endedAt: at(10), audio: { enabled: true }, tasks: [{ id: 't', prompt: 'P' }] };
+  const log = [{ ts: at(0), type: 'task-start', taskId: 't' }, { ts: at(4), type: 'audio-gap', taskId: 't', gapStart: at(4), gapMs: 400 }];
+  const audio = [{ audioSegmentId: 'a', startTs: at(0), endTs: at(10) }];
+  const md = buildSummary({ session, log, audio });
+  assert.ok(md.includes('- Audio gaps: none of 0.5s or more'), md);
+  assert.ok(md.includes('audio-gap 0.4s (under 0.5s, not counted as a gap)'), md);
+});
