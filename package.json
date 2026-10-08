@@ -23,12 +23,16 @@
   "sideEffects": [
     "./dist/script/*"
   ],
+  "workspaces": [
+    "examples/*"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "node scripts/build.mjs --watch",
     "serve": "node scripts/build.mjs && python3 -m http.server 8080 --bind 0.0.0.0 --directory public",
     "test": "node --test 'test/*.test.js'",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "example:react": "npm run build && npm run dev --workspace examples/react"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",
