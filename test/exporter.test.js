@@ -106,7 +106,7 @@ test('buildPayload matches the export contract', async () => {
   assert.equal(payload.session, session);
   assert.deepEqual(payload.audio, []);
   assert.match(payload.summaryMarkdown, /^# TestKit session: S/);
-  assert.deepEqual(Object.keys(payload).sort(), ['audio', 'events', 'exportedAt', 'log', 'session', 'summaryMarkdown', 'testkitVersion', 'version']);
+  assert.deepEqual(Object.keys(payload).sort(), ['audio', 'audioDropped', 'audioOmitted', 'events', 'exportedAt', 'log', 'omittedAudio', 'session', 'summaryMarkdown', 'testkitVersion', 'version']);
 });
 
 const naive = (payload) => escapeJson(JSON.stringify(payload));
@@ -173,4 +173,24 @@ test('large session: ~150 MB payload exports as a Blob without one giant string'
   // Round-trip the tail only, to keep the test's own memory modest.
   const tail = await blob.slice(blob.size - 200).text();
   assert.ok(tail.endsWith('</script>\n</body>\n</html>\n'));
+});
+
+test('buildPayload: audio that cannot be encoded raises AudioExportError; withoutAudio builds the visual-only file', async () => {
+  const { AudioExportError, AUDIO_EXPORT_FAILED } = await import('../src/export/payload.js');
+  const broken = { arrayBuffer: async () => { throw new RangeError('Invalid string length'); }, type: 'audio/webm', size: 1 };
+  const data = { session: { study: 'S', startedAt: 0, endedAt: 10_000, audio: { enabled: true } }, events: [], log: [], audio: [{ audioSegmentId: 'a', startTs: 0, endTs: 10_000, mime: 'audio/webm', blob: broken }] };
+  await assert.rejects(buildPayload(data), (err) => err instanceof AudioExportError && err.message === AUDIO_EXPORT_FAILED);
+  const visual = await buildPayload(data, { withoutAudio: true });
+  assert.deepEqual(visual.audio, []);
+  assert.equal(visual.audioOmitted, true);
+  assert.deepEqual(visual.omittedAudio, [{ audioSegmentId: 'a', startTs: 0, endTs: 10_000, mime: 'audio/webm' }], 'metadata kept for the player');
+  assert.match(visual.summaryMarkdown, /- Audio saved: Audio recorded\n/);
+  assert.match(visual.summaryMarkdown, /left out of this file/);
+});
+
+test('60 minutes of audio at the default bitrate (≈14.4 MB) assembles into an export', async () => {
+  const bytes = new Uint8Array(3600 * 4000).map((_, i) => i & 255);
+  const payload = await buildPayload({ session: { study: 'Long', startedAt: 0, endedAt: 3_600_000, audio: { enabled: true } }, events: [{ type: 4, timestamp: 0 }], log: [], audio: [{ audioSegmentId: 'a', startTs: 0, endTs: 3_600_000, mime: 'audio/webm', blob: new Blob([bytes]) }] });
+  const { blob } = buildHtmlBlob({ payload, playerJs: '' });
+  assert.ok(blob.size > bytes.length * 4 / 3, `${blob.size}`);
 });

@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Audio recording plan — review</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a222c;
+    --panel2: #222c38;
+    --text: #e7eef6;
+    --muted: #9aabbd;
+    --line: #2d3a49;
+    --p0: #ff6b6b;
+    --p1: #ffb020;
+    --p2: #6ec6ff;
+    --ok: #5bd6a2;
+    --accent: #7dd3c0;
+    --warn-bg: rgba(255, 176, 32, 0.12);
+    --p0-bg: rgba(255, 107, 107, 0.12);
+    --ok-bg: rgba(91, 214, 162, 0.1);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.55 "IBM Plex Sans", "Segoe UI", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(1000px 500px at 10% -10%, #1c3a3a 0%, transparent 55%),
+      radial-gradient(800px 400px at 100% 0%, #24314a 0%, transparent 50%),
+      var(--bg);
+  }
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 2.5rem 1.25rem 4rem;
+  }
+  h1 {
+    font: 700 1.85rem/1.2 "IBM Plex Serif", Georgia, serif;
+    margin: 0 0 0.4rem;
+    letter-spacing: -0.02em;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 0.92rem;
+    margin-bottom: 1.75rem;
+  }
+  .verdict {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.15rem;
+    border-radius: 8px;
+    margin-bottom: 1.75rem;
+  }
+  .verdict strong { color: var(--accent); }
+  h2 {
+    font: 650 1.15rem/1.3 "IBM Plex Sans", sans-serif;
+    margin: 2rem 0 0.75rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid var(--line);
+  }
+  h3 {
+    font-size: 0.95rem;
+    margin: 1.1rem 0 0.4rem;
+    color: var(--accent);
+  }
+  p, li { color: var(--text); }
+  .muted { color: var(--muted); }
+  .grid {
+    display: grid;
+    gap: 0.75rem;
+  }
+  .finding {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+  }
+  .finding.p0 { border-left: 4px solid var(--p0); background: linear-gradient(90deg, var(--p0-bg), var(--panel) 28%); }
+  .finding.p1 { border-left: 4px solid var(--p1); background: linear-gradient(90deg, var(--warn-bg), var(--panel) 28%); }
+  .finding.p2 { border-left: 4px solid var(--p2); }
+  .finding header {
+    display: flex;
+    gap: 0.6rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+    margin-bottom: 0.35rem;
+  }
+  .finding h3 { margin: 0; color: var(--text); font-size: 1rem; }
+  .sev {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .sev.p0 { background: var(--p0); color: #1a0a0a; }
+  .sev.p1 { background: var(--p1); color: #1a1200; }
+  .sev.p2 { background: var(--p2); color: #061018; }
+  .tag {
+    font-size: 0.72rem;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+  }
+  .finding p { margin: 0.35rem 0; font-size: 0.93rem; }
+  .finding .fix { font-size: 0.85rem; color: var(--muted); margin-top: 0.45rem; }
+  .finding .fix code, code {
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    font-size: 0.84em;
+    background: var(--panel2);
+    padding: 0.05em 0.35em;
+    border-radius: 3px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    margin: 0.75rem 0 1rem;
+  }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid var(--line);
+  }
+  th { background: var(--panel2); color: var(--muted); font-weight: 600; }
+  td { background: var(--panel); }
+  .good {
+    background: var(--ok-bg);
+    border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--line));
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+  }
+  .good li { margin: 0.35rem 0; }
+  .rewrite {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin: 0.6rem 0;
+  }
+  .rewrite summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .rewrite pre {
+    white-space: pre-wrap;
+    font: 0.85rem/1.45 "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    background: var(--panel2);
+    padding: 0.85rem;
+    border-radius: 6px;
+    margin: 0.75rem 0 0;
+    color: var(--text);
+  }
+  .disagree {
+    border: 1px dashed var(--p1);
+    background: var(--warn-bg);
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin: 1rem 0;
+  }
+  ol.actions { padding-left: 1.2rem; }
+  ol.actions li { margin: 0.45rem 0; }
+  footer {
+    margin-top: 2.5rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+  }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Audio recording plan — improvement review</h1>
+  <p class="meta">
+    Source: <code>audio-recording-plan.md</code> · Reviewed against <code>src/core/*</code>, export, player, <code>package.json</code> ·
+    2026-10-07 · Lenses: technical architect, product/UX, adversarial refuter (Codex cross-vendor pass hung on hooks; skipped)
+  </p>
+
+  <div class="verdict">
+    <strong>Verdict:</strong> The plan’s diagnosis is strong — failure taxonomy, keep visual recording, honest gaps, and distrust of “code exists ⇒ reliable” are right. It is not yet ready to implement as written. Before coding recovery UI, resolve the <code>enabled</code>/<code>stopAsking</code> model, status vocabulary, and what “live” means; defer or narrow track-<code>mute</code> and irreversible seq-trim; rewrite sync acceptance so AEC does not poison the gate; and treat Baseline as greenfield (no <code>test:browser</code> today).
+  </div>
+
+  <h2>What already works in the plan</h2>
+  <div class="good">
+    <ul>
+      <li>Three failure classes with visual recording continuing — matches the real split in <code>audio.js</code> / <code>session.js</code>.</li>
+      <li>Overlay and player sharing <code>audioGaps</code> for saved-audio status is the right single source of truth (with caveats on inputs/thresholds below).</li>
+      <li>Honest about fake-device limits and Safari needing real hardware; delivery order (baseline → recovery → matrix) is the right shape.</li>
+    </ul>
+  </div>
+
+  <h2>Priority findings</h2>
+  <div class="grid">
+
+    <article class="finding p0">
+      <header>
+        <span class="sev p0">P0</span>
+        <h3>Fix <code>enabled</code> vs stop-asking before any Retry UI</h3>
+        <span class="tag">schema</span>
+      </header>
+      <p>Plan §2 correctly names the bug: persistent denial sets <code>session.audio.enabled = false</code>, which makes <code>audioGaps</code> return nothing and summary say “Audio: not recorded” even when segments exist (<code>session.js</code> ~419, <code>summary.js</code>). Reusing <code>resume()</code> / <code>restartAudioAfterNavigation</code> without a schema split will ship Recovery that re-triggers the bug.</p>
+      <p class="fix">Decide fields, write rules at start / denial / skip / retry, and one CONTRACTS meaning for “not recorded” vs “recorded with gaps.” Base reporting on persisted segments.</p>
+    </article>
+
+    <article class="finding p0">
+      <header>
+        <span class="sev p0">P0</span>
+        <h3>Blocked vs recoverable “Unavailable” must be different UX</h3>
+        <span class="tag">product</span>
+      </header>
+      <p>§2 collapses device loss, recorder error, persistence failure, and later-page denial into one “Audio isn't recording” + Retry. Denial needs site-settings guidance and stop-asking; device loss needs Retry / <code>devicechange</code> offer. Testers will not know whether to open settings or click Retry.</p>
+      <p class="fix">Split copy/CTAs: <strong>Microphone blocked</strong> vs <strong>Audio stopped</strong> (recoverable). Do not auto-<code>getUserMedia</code> on <code>devicechange</code>.</p>
+    </article>
+
+    <article class="finding p0">
+      <header>
+        <span class="sev p0">P0</span>
+        <h3>Define when status becomes <code>live</code></h3>
+        <span class="tag">correctness</span>
+      </header>
+      <p>Acceptance requires “badge never shows live while nothing is saved,” but <code>appendAudio</code> failures only hit <code>reportError</code> today — audio status can stay <code>live</code> (<code>session.js</code> onChunk). Track <code>mute</code> can still append silent chunks successfully, so silence ≠ unsaved.</p>
+      <p class="fix">Pick the signal: after first successful <code>appendAudio</code>, or demote on write failure / stop segment. Narrow acceptance: never <strong>Recording</strong> when the active segment is not appending (Mute excepted).</p>
+    </article>
+
+    <article class="finding p0">
+      <header>
+        <span class="sev p0">P0</span>
+        <h3>Sync acceptance methodology fights AEC</h3>
+        <span class="tag">acceptance</span>
+      </header>
+      <p>Speaker beep → mic + on-screen counter assumes loopback. Capture requests <code>echoCancellation: true</code> (<code>audio.js</code> ~119). AEC often removes speaker audio from the mic path — the gate can fail a good player or pass a bad one.</p>
+      <p class="fix">Use a fixture that does not rely on speaker→mic (injected tick / AEC off for the harness), or mark headphone-only as N/A. Align the 500 ms proposal with player’s existing 300 ms <code>DRIFT_TOLERANCE_S</code>.</p>
+    </article>
+
+    <article class="finding p1">
+      <header>
+        <span class="sev p1">P1</span>
+        <h3>Coverage clock ≠ media duration</h3>
+        <span class="tag">architecture</span>
+      </header>
+      <p><code>groupAudioChunks</code> uses last chunk wall <code>ts</code> as <code>endTs</code>; the player seeks by wall elapsed. MediaRecorder <code>dataavailable</code> timing is not media duration (plan cites MDN). Seq-gap trimming that shortens <code>endTs</code> inherits the same lie.</p>
+      <p class="fix">Long-term: derive playable length from decoded/blob duration. Short-term: do not treat gap-trim unit tests or marker sync alone as reliability proof.</p>
+    </article>
+
+    <article class="finding p1">
+      <header>
+        <span class="sev p1">P1</span>
+        <h3>Baseline cites tooling that does not exist</h3>
+        <span class="tag">delivery</span>
+      </header>
+      <p>Delivery step 1: “e.g. <code>npm run test:browser</code>.” <code>package.json</code> only has <code>test</code> / <code>build</code> / <code>serve</code> — no Playwright/Puppeteer harness. Baseline is greenfield, not wiring existing tests.</p>
+      <p class="fix">Make harness existence part of Baseline done-when; put one Safari real-mic smoke and offline seek/decode before Recovery is “done.”</p>
+    </article>
+
+    <article class="finding p1">
+      <header>
+        <span class="sev p1">P1</span>
+        <h3>“Reuse resume/navigation” under-specifies a shared primitive</h3>
+        <span class="tag">implementation</span>
+      </header>
+      <p>Those paths differ in gap accounting and whether they persist <code>enabled: false</code>. <code>onProblem</code> does not await <code>stopSegment()</code>. “Wait for failed segment to settle” is new coordination, not reuse.</p>
+      <p class="fix">Plan should name one <code>retryMic</code>-style controller surface and its interaction with <code>generation</code>.</p>
+    </article>
+
+    <article class="finding p1">
+      <header>
+        <span class="sev p1">P1</span>
+        <h3>Seq-gap trim is irreversible and still an open question</h3>
+        <span class="tag">export</span>
+      </header>
+      <p>Plan admits unknown browser decode of stitched segments with missing chunks, then plans to cut at first <code>seq</code> hole in grouping. That can permanently discard data that might still decode.</p>
+      <p class="fix">Prefer detect + surface (“unreliable segment”) until the matrix records decode behavior; missing <code>seq</code> 0 → drop segment is the safer first cut.</p>
+    </article>
+
+    <article class="finding p1">
+      <header>
+        <span class="sev p1">P1</span>
+        <h3>Track <code>mute</code> as a first-class failure oversells browsers</h3>
+        <span class="tag">devices</span>
+      </header>
+      <p>Code only listens for <code>ended</code> + recorder <code>error</code>. Plan’s own open question: browsers may fire <code>mute</code> vs <code>ended</code>. A silent track can still save chunks; acceptance equating mute with “nothing saved” is wrong.</p>
+      <p class="fix">Ship <code>ended</code>, recorder error, and <code>appendAudio</code> failure with status≠live first; treat <code>mute</code>/<code>devicechange</code> as observational until the matrix says otherwise.</p>
+    </article>
+
+    <article class="finding p1">
+      <header>
+        <span class="sev p1">P1</span>
+        <h3>Internal contradiction: pause releases mic</h3>
+        <span class="tag">accuracy</span>
+      </header>
+      <p>“Already in place” says a paused page releases the microphone. §3 says pause does not necessarily release the stream. Code: same-page <code>pause()</code> only <code>stopSegment()</code>; release is on paused navigation/bfcache restore.</p>
+      <p class="fix">Fix the “already in place” bullet; add user-facing pause copy that the browser mic indicator may remain until Stop/Discard.</p>
+    </article>
+
+    <article class="finding p1">
+      <header>
+        <span class="sev p1">P1</span>
+        <h3>“Audio recorded with gaps” needs a user threshold</h3>
+        <span class="tag">product</span>
+      </header>
+      <p><code>audioGaps</code> already drops gaps &lt; 500 ms, but short nav gaps and seq-trims will often produce <em>some</em> gap. Without explicit “with gaps” rules and copy (“gaps = missing capture, not bad speech”), download will cry wolf.</p>
+    </article>
+
+    <article class="finding p2">
+      <header>
+        <span class="sev p2">P2</span>
+        <h3>Consent when audio intent changes</h3>
+        <span class="tag">product</span>
+      </header>
+      <p>Keeping Continue-without-audio after a passed check is good, but the plan never says whether skip-after-pass or mid-session Retry needs re-consent. Add an explicit rule.</p>
+    </article>
+
+    <article class="finding p2">
+      <header>
+        <span class="sev p2">P2</span>
+        <h3>Collapsed bubble / tab ownership / sleep</h3>
+        <span class="tag">edge cases</span>
+      </header>
+      <p>Recovery must be obvious when the panel is collapsed (<code>aria-live</code> / badge). Also missing: Retry while paused or in Stop dialog; another tab owns recording; laptop sleep ending tracks; SPA routes that never hit <code>restartAudioAfterNavigation</code>.</p>
+    </article>
+
+    <article class="finding p2">
+      <header>
+        <span class="sev p2">P2</span>
+        <h3>Quota vs export size</h3>
+        <span class="tag">ops</span>
+      </header>
+      <p>60‑minute AC mentions storage quota but not HTML/base64 export memory. Recording can fit IDB while export OOMs. State a supported max and the exact failure string for both paths.</p>
+    </article>
+  </div>
+
+  <h2>Acceptance criteria — tighten or they give false confidence</h2>
+  <table>
+    <thead>
+      <tr><th>Criterion</th><th>Problem</th><th>Fix direction</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>“proposed 500 ms” sync</td>
+        <td>Provisional; AEC-poisoned method; player already uses 300 ms drift</td>
+        <td>Lock a number, method, settle timeout; exclude transitions in a separate table</td>
+      </tr>
+      <tr>
+        <td>Speech absent during mute/pause</td>
+        <td>Mute saves silence (audio present); no measurement method</td>
+        <td>Mute = near-silent covered span; pause = no chunks, not an audio gap</td>
+      </tr>
+      <tr>
+        <td>Never live while nothing saved</td>
+        <td>Conflicts with Mute and brief reconnecting</td>
+        <td>Never Recording when active segment not appending (Mute excepted)</td>
+      </tr>
+      <tr>
+        <td>Page‑3 denial labels pages 1–2</td>
+        <td>Depends on schema fix not named in the AC</td>
+        <td>Name download line + forbid “Audio: not recorded”</td>
+      </tr>
+      <tr>
+        <td>Track mute → not live</td>
+        <td>Silence can still be saved</td>
+        <td>Drop or mark as matrix-dependent</td>
+      </tr>
+      <tr>
+        <td>Continue without audio after pass</td>
+        <td>In planned work, not in AC</td>
+        <td>Add AC so it cannot regress</td>
+      </tr>
+      <tr>
+        <td>Browser matrix</td>
+        <td>In delivery §3, not binding AC outcomes</td>
+        <td>Bind pass/fail/limitation per browser × scenario</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Suggested plan rewrites</h2>
+
+  <details class="rewrite">
+    <summary>Status dictionary (replace §3 prose)</summary>
+    <pre>User-facing audio status is exactly one of:
+  Microphone on | Muted | Paused (session phase; mic badge secondary) |
+  Reconnecting… | Microphone blocked | Audio stopped (recoverable).
+
+Download line (stopped view, before Download) is exactly one of:
+  Audio recorded | Audio recorded with gaps (uncovered ≥ AUDIO_GAP_MIN_MS
+  outside pause spans) | No audio recorded.
+
+Overlay, summary, and player gap list must use the same audioGaps result
+on the same post-grouping segments.</pre>
+  </details>
+
+  <details class="rewrite">
+    <summary>Recovery CTAs (replace §2 one-liner)</summary>
+    <pre>Recoverable failure: “Audio stopped — screen is still recording.” Primary: Retry microphone.
+Blocked permission: “Microphone blocked — screen is still recording.”
+  Primary: How to allow microphone. Secondary: Continue without microphone (stop-asking; keep segments).
+Do not auto-call getUserMedia on devicechange; only emphasize Retry when a device reappears.
+Announce via the existing live region when the panel is collapsed.</pre>
+  </details>
+
+  <details class="rewrite">
+    <summary>Delivery order (replace § Delivery)</summary>
+    <pre>0. Schema: enabled vs stopAsking vs has-segments; CONTRACTS updated.
+1. Baseline harness: real test:browser (or equivalent) with Chrome fake audio;
+   record → navigate ×2 → export → assert segments + gaps + decode/seek smoke.
+2. Capture/status: ended, recorder error, appendAudio→status≠live; Retry primitive;
+   unit tests. Seq continuity: detect/report; trim only after matrix evidence.
+3. Acceptance matrix: real mic, disconnect, Safari; sync fixture without AEC poison;
+   commit results. Mute/devicechange policies filled from observations.</pre>
+  </details>
+
+  <div class="disagree">
+    <strong>Open disagreement (leave for your call):</strong> Architect/refuter lean toward media-duration as coverage truth and soft seq-gap handling first. The plan’s hard trim-at-first-hole is simpler to implement and may be fine if you accept permanent discard of trailing chunks. Recommendation: detect in Baseline, decide trim vs soft after one Chrome+Firefox+Safari decode pass — don’t lock the cut rule in §5 yet.
+  </div>
+
+  <h2>Recommended edit order for the plan doc</h2>
+  <ol class="actions">
+    <li>Resolve schema + status dictionary + when <code>live</code> flips (P0 blockers).</li>
+    <li>Fix contradictory pause/mic bullets; add consent + collapsed-bubble rules.</li>
+    <li>Narrow failure classes for v1; move track <code>mute</code> to open questions / matrix.</li>
+    <li>Rewrite sync AC and delivery Baseline around a real harness + non-AEC fixture.</li>
+    <li>Soften §5 seq-gap to “detect; trim policy after matrix.”</li>
+    <li>Replace provisional/circular ACs with the tightened bullets above.</li>
+  </ol>
+
+  <footer>
+    Review artifact only — plan file not modified.
+    Context for cross-vendor refute: <code>~/.ai-context/local-session-replay-audio-plan-review/</code>.
+    Worktree write path: <code>local-session-replay-cursor/artifacts/</code> on <code>ai/cursor</code>.
+  </footer>
+</main>
+</body>
+</html>

@@ -1,8 +1,10 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EDGE_MARGIN,
+  canSkipTask,
   canStart,
+  createAdvanceGuard,
   consentText,
   createMicCheck,
   describeDuration,
@@ -10,11 +12,18 @@ import {
   formatCountdown,
   formatElapsed,
   hasMovedPastThreshold,
+  AUDIO_COPY,
+  audioAnnouncement,
+  audioNotice,
   micKind,
   parsePosition,
+  previousDownloadText,
+  savedAudioText,
   snapPosition,
   taskRemainingMs,
+  taskTally,
   tasksCompleted,
+  tasksSkipped,
 } from '../src/overlay/model.js';
 
 test('formatElapsed uses mm:ss, then h:mm:ss past an hour', () => {
@@ -124,4 +133,107 @@ test('micKind maps controller audio state to an indicator', () => {
   assert.equal(micKind({ enabled: true, status: 'denied' }), 'denied');
   assert.equal(micKind({ enabled: true, status: 'bogus' }), 'off');
   assert.equal(micKind(undefined), 'off');
+  assert.equal(micKind({ enabled: true, status: 'reconnecting' }), 'reconnecting');
+  assert.equal(micKind({ enabled: true, status: 'live' }, 'paused'), 'paused', 'session phase owns the badge');
+  assert.equal(micKind({ enabled: true, status: 'error' }, 'paused'), 'error', 'a failure still shows while paused');
+});
+
+test('audioNotice: recoverable vs blocked vs tester-chosen off', () => {
+  assert.equal(audioNotice({ enabled: true, status: 'error' }), 'stopped');
+  assert.equal(audioNotice({ enabled: true, status: 'denied' }), 'blocked');
+  assert.equal(audioNotice({ enabled: true, status: 'reconnecting' }), 'reconnecting');
+  assert.equal(audioNotice({ enabled: true, status: 'off', stopAsking: true }), 'off');
+  assert.equal(audioNotice({ enabled: true, status: 'off', stopAsking: false }), null);
+  assert.equal(audioNotice({ enabled: true, status: 'live' }), null);
+  assert.equal(audioNotice({ enabled: false, status: 'error' }), null, 'no voice chosen at Start: nothing to recover');
+  assert.equal(AUDIO_COPY.stopped, 'Audio stopped — screen is still recording.');
+  assert.equal(AUDIO_COPY.blocked, 'Microphone blocked — screen is still recording.');
+  assert.equal(AUDIO_COPY.paused, 'Session paused — prototype interaction and voice are not saved.');
+  assert.equal(AUDIO_COPY.pausedMic, 'Your browser may still show the microphone as in use until you stop the session.');
+});
+
+test('audioAnnouncement: mic death and recovery are spoken even when collapsed', () => {
+  assert.equal(audioAnnouncement({ enabled: true, status: 'live' }, { enabled: true, status: 'error' }), AUDIO_COPY.stopped);
+  assert.equal(audioAnnouncement({ enabled: true, status: 'reconnecting' }, { enabled: true, status: 'denied' }), AUDIO_COPY.blocked);
+  assert.equal(audioAnnouncement({ enabled: true, status: 'reconnecting' }, { enabled: true, status: 'live' }), 'Microphone on again.');
+  assert.equal(audioAnnouncement({ enabled: true, status: 'pending' }, { enabled: true, status: 'live' }), null, 'normal start is quiet');
+  assert.equal(audioAnnouncement({ enabled: true, status: 'live' }, { enabled: true, status: 'live' }), null);
+});
+
+test('savedAudioText: exactly one verdict; gaps explain what a gap means', () => {
+  assert.equal(savedAudioText({ kind: 'recorded', label: 'Audio recorded' }), 'Audio recorded');
+  assert.equal(savedAudioText({ kind: 'none', label: 'No audio recorded' }), 'No audio recorded');
+  assert.match(savedAudioText({ kind: 'gaps', label: 'Audio recorded with gaps', gaps: 2, gapMs: 4200 }),
+    /^Audio recorded with gaps \(2 gaps, about 4 s\)\. Gaps are stretches where the microphone was not capturing/);
+  assert.equal(savedAudioText(null), null);
+});
+
+test('taskTally: skipped tasks are counted apart from completed ones', () => {
+  const tasks = [{}, {}, {}];
+  assert.equal(taskTally({ tasks, tasksCompleted: 2, tasksSkipped: 1 }), '2 of 3 completed, 1 skipped');
+  assert.equal(taskTally({ tasks, tasksCompleted: 3, tasksSkipped: 0 }), '3 of 3 completed');
+  assert.equal(tasksSkipped({ tasks }), 0, 'older controllers report no skips');
+  assert.equal(tasksSkipped({ tasks, tasksSkipped: 9 }), 3);
+});
+
+test('previousDownloadText: says when the previous file was handed to the browser, only if it was', () => {
+  assert.equal(previousDownloadText(null), null);
+  const text = previousDownloadText(new Date(2026, 9, 8, 14, 12).getTime());
+  assert.match(text, /downloaded at .*12/);
+  assert.match(text, /Cancel to download it again/);
+});
+
+test('canSkipTask: only for a scripted task, never in free exploration', () => {
+  assert.equal(canSkipTask({ tasks: [], taskIndex: -1 }), false);
+  assert.equal(canSkipTask({ tasks: [], taskIndex: 0 }), false);
+  assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 0 }), true);
+  assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 1 }), false);
+});
+
+test('advance guard: drops presses while a call is in flight, and lets go of a call that never settles', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const guard = createAdvanceGuard({ timeoutMs: 10_000 });
+    let calls = 0;
+    const never = () => {
+      calls++;
+      return new Promise(() => {});
+    };
+    guard.run(never);
+    assert.equal(guard.run(never), false, 'second press dropped');
+    assert.equal(calls, 1);
+    mock.timers.tick(9_999);
+    assert.equal(guard.busy, true);
+    mock.timers.tick(1);
+    assert.equal(guard.busy, false, 'released after the timeout');
+    guard.run(() => {
+      calls++;
+      return Promise.resolve();
+    });
+    assert.equal(calls, 2, 'Next works again');
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(guard.busy, false, 'a settled call releases at once');
+    assert.throws(() => guard.run(() => { throw new Error('sync'); }));
+    assert.equal(guard.busy, false, 'a throwing call releases');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('advance guard: a timed-out call that settles late does not release a newer one', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const guard = createAdvanceGuard({ timeoutMs: 100 });
+    let finishFirst;
+    guard.run(() => new Promise((r) => { finishFirst = r; }));
+    mock.timers.tick(100);
+    guard.run(() => new Promise(() => {})); // the newer call holds the guard
+    finishFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(guard.busy, true);
+  } finally {
+    mock.timers.reset();
+  }
 });

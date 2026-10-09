@@ -20,6 +20,13 @@ const MAX_PENDING_EVENTS = 500;
 const MAX_ATTEMPTS = 3;
 const FULL_SNAPSHOT = 2; // rrweb EventType.FullSnapshot
 
+// Write order, for ties on ts: IndexedDB returns rows in key order, and keys
+// (`<random batchId>:l<n>`) sort neither across batches nor past l9. Every
+// log row and event chunk carries `page` (this page load's navigation start,
+// so a later page sorts after an earlier one) and `seq` (append order here).
+const PAGE = Number(globalThis.performance?.timeOrigin) || Date.now();
+let rowSeq = 0;
+
 let db = null;
 let dbPromise = null;
 let lifecycleInstalled = false;
@@ -49,44 +56,82 @@ export function chunkEvents(pending) {
   return chunks;
 }
 
+// `<batchId>:<e|l><n>` → [batchId, n]; rows written before page/seq existed
+// can still be ordered within their batch.
+function keyParts(id) {
+  const m = /^(.*):[el](\d+)$/.exec(typeof id === 'string' ? id : '');
+  return m ? [m[1], Number(m[2])] : null;
+}
+
+/** Write order of two stored rows (log entries or event chunks); 0 if unknown. */
+export function compareWriteOrder(a, b) {
+  if (Number.isFinite(a.seq) && Number.isFinite(b.seq)) return (a.page ?? 0) - (b.page ?? 0) || a.seq - b.seq;
+  const ka = keyParts(a.id);
+  const kb = keyParts(b.id);
+  return ka && kb && ka[0] === kb[0] ? ka[1] - kb[1] : 0;
+}
+
 /** Flattens stored chunks into one event array ordered by rrweb timestamp. */
 export function flattenEventChunks(chunks) {
   const events = [];
-  for (const chunk of chunks) for (const e of chunk.events || []) events.push(e);
+  const ordered = [...chunks].sort((a, b) => compareWriteOrder(a, b) || (a.ts ?? 0) - (b.ts ?? 0));
+  for (const chunk of ordered) for (const e of chunk.events || []) events.push(e);
   // Array#sort is stable, so same-timestamp events keep their emit order
   // (rrweb's Meta and FullSnapshot often share a millisecond).
   return events.sort((a, b) => a.timestamp - b.timestamp);
 }
 
 export function sortLog(entries) {
-  return entries
-    .map(({ id, sessionId, ...entry }) => entry)
-    .sort((a, b) => a.ts - b.ts);
+  return [...entries]
+    .sort((a, b) => a.ts - b.ts || compareWriteOrder(a, b))
+    .map(({ id, sessionId, page, seq, ...entry }) => entry);
 }
 
 /**
  * Stitches audio chunks into one Blob per audio segment. A segment's startTs
  * is the MediaRecorder 'start' time; endTs is when its last chunk arrived.
+ *
+ * Chunks are written one transaction each, so one can go missing (aborted at
+ * unload, failed write). Without seq 0 (the container header) the rest is
+ * undecodable, so that segment is dropped and reported in `dropped`. A hole
+ * later on is kept and reported as `seqGaps` (missing seq numbers): Chrome
+ * plays such a file through to the end with its timestamps intact, so
+ * trimming would only lose audio (docs/audio-matrix.md; Firefox and Safari
+ * are still unmeasured).
  */
-export function groupAudioChunks(chunks) {
+export function groupAudioChunksReport(chunks) {
   const bySegment = new Map();
   for (const c of chunks) {
     if (!bySegment.has(c.audioSegmentId)) bySegment.set(c.audioSegmentId, []);
     bySegment.get(c.audioSegmentId).push(c);
   }
   const segments = [];
+  const dropped = [];
   for (const [audioSegmentId, list] of bySegment) {
     list.sort((a, b) => a.seq - b.seq);
     const mime = list[0].mime || 'audio/webm';
-    segments.push({
-      audioSegmentId,
-      startTs: list[0].startTs ?? list[0].ts,
-      endTs: Math.max(...list.map((c) => c.ts)),
-      mime,
-      blob: new Blob(list.map((c) => c.blob), { type: mime }),
-    });
+    const startTs = list[0].startTs ?? list[0].ts;
+    const endTs = Math.max(...list.map((c) => c.ts));
+    if (list[0].seq !== 0) {
+      dropped.push({ audioSegmentId, startTs, endTs, mime, chunks: list.length, reason: 'missing-first-chunk' });
+      continue;
+    }
+    const seqGaps = [];
+    for (let i = 1; i < list.length; i++) {
+      for (let s = list[i - 1].seq + 1; s < list[i].seq; s++) seqGaps.push(s);
+    }
+    const seg = { audioSegmentId, startTs, endTs, mime, blob: new Blob(list.map((c) => c.blob), { type: mime }) };
+    if (seqGaps.length) seg.seqGaps = seqGaps;
+    segments.push(seg);
   }
-  return segments.sort((a, b) => a.startTs - b.startTs);
+  return {
+    segments: segments.sort((a, b) => a.startTs - b.startTs),
+    dropped: dropped.sort((a, b) => a.startTs - b.startTs),
+  };
+}
+
+export function groupAudioChunks(chunks) {
+  return groupAudioChunksReport(chunks).segments;
 }
 
 /** Recording time excluding paused time, derived from a SessionRecord. */
@@ -221,7 +266,7 @@ export function flush() {
 // transaction that did commit and by a later spill import — collapse into one.
 function createBatch() {
   const batchId = newBatchId();
-  const events = chunkEvents(pendingEvents).map((chunk, i) => ({ ...chunk, id: `${batchId}:e${i}` }));
+  const events = chunkEvents(pendingEvents).map((chunk, i) => ({ ...chunk, id: `${batchId}:e${i}`, page: PAGE, seq: ++rowSeq }));
   const log = pendingLog.map((entry, i) => ({ ...entry, id: `${batchId}:l${i}` }));
   let settle;
   const batch = { events, log, waiter: pendingWaiter, attempts: 0 };
@@ -393,7 +438,7 @@ export function appendEvents(sessionId, segmentId, events) {
 
 /** Buffers a log entry. Resolves once written; never rejects. */
 export function appendLog(sessionId, entry) {
-  pendingLog.push({ ...entry, sessionId });
+  pendingLog.push({ ...entry, sessionId, page: PAGE, seq: ++rowSeq });
   const p = waiter();
   scheduleFlush(false);
   return p;
@@ -467,12 +512,34 @@ export async function loadSessionData(id) {
     byIndex('audio'),
   ]);
   if (!session) throw new Error(`Unknown session ${id}`);
+  const { segments, dropped } = groupAudioChunksReport(audio);
   return {
     session,
     events: flattenEventChunks(eventChunks),
     log: sortLog(log),
-    audio: groupAudioChunks(audio),
+    audio: segments,
+    audioDropped: dropped,
   };
+}
+
+/**
+ * What the pre-download "saved audio" line needs, without the rrweb events:
+ * `{ session, log, audio, audioDropped }`, grouped exactly as loadSessionData()
+ * groups them so the overlay and the export agree.
+ */
+export async function loadAudioReport(id) {
+  await flush();
+  await ready();
+  const tx = db.transaction(['sessions', 'log', 'audio']);
+  const byIndex = (name) => requestToPromise(tx.objectStore(name).index('sessionId').getAll(IDBKeyRange.only(id)));
+  const [session, log, audio] = await Promise.all([
+    requestToPromise(tx.objectStore('sessions').get(id)),
+    byIndex('log'),
+    byIndex('audio'),
+  ]);
+  if (!session) throw new Error(`Unknown session ${id}`);
+  const { segments, dropped } = groupAudioChunksReport(audio);
+  return { session, log: sortLog(log), audio: segments, audioDropped: dropped };
 }
 
 export async function deleteSession(id) {

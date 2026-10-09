@@ -144,9 +144,9 @@
 .tk-mic-glyph { display: flex; width: 100%; height: 100%; }
 .tk-mic svg { width: 100%; height: 100%; }
 .tk-mic.is-live { color: var(--tk-ok); }
-.tk-mic.is-muted, .tk-mic.is-pending { color: var(--tk-warn); }
+.tk-mic.is-muted, .tk-mic.is-pending, .tk-mic.is-reconnecting { color: var(--tk-warn); }
 .tk-mic.is-denied, .tk-mic.is-error { color: var(--tk-danger-text); }
-.tk-mic.is-off { color: var(--tk-text-muted); }
+.tk-mic.is-off, .tk-mic.is-paused { color: var(--tk-text-muted); }
 
 /* ---- Panel ---- */
 

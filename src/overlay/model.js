@@ -1,5 +1,6 @@
 // Pure helpers for the overlay: formatting, bubble geometry, and view gating.
 // Kept DOM-free so they can be unit-tested under node:test.
+import { GAPS_MEANING } from '../export/summary.js';
 
 export const EDGE_MARGIN = 12;
 export const DRAG_THRESHOLD = 4;
@@ -103,6 +104,73 @@ export function tasksCompleted(state, { finishedLast = false } = {}) {
   return clamp(state.taskIndex ?? 0, 0, total);
 }
 
+// Local wall-clock time, e.g. "14:12" (or "2:12 PM", per the browser's locale).
+export function formatClock(ts) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Setup line after "Start new session" from a downloaded session. JS only knows
+// the file was handed to the browser, so the tester gets a chance to check.
+export function previousDownloadText(ts) {
+  if (!Number.isFinite(ts)) return null;
+  return `The previous session’s file was downloaded at ${formatClock(ts)}. If it isn’t in your downloads folder, choose Cancel to download it again.`;
+}
+
+// Skip task is offered only for a scripted task: free exploration has
+// nothing to skip (its Finish is Stop).
+export function canSkipTask(state) {
+  return Boolean(state?.tasks?.length && state.tasks[state.taskIndex]);
+}
+
+export const ADVANCE_TIMEOUT_MS = 10_000;
+
+/**
+ * One Next/Skip call at a time. A press while one is in flight is dropped;
+ * if a call never settles, the guard lets go after `timeoutMs` so the buttons
+ * don't stay dead until reload (the controller's taskIndex check still stops
+ * a double advance). `run(fn)` → false when dropped, else fn's result.
+ */
+export function createAdvanceGuard({ timeoutMs = ADVANCE_TIMEOUT_MS } = {}) {
+  let busy = null; // token of the call holding the guard
+  return {
+    get busy() {
+      return busy !== null;
+    },
+    run(fn) {
+      if (busy) return false;
+      const token = {};
+      busy = token;
+      const release = () => {
+        if (busy === token) busy = null;
+        clearTimeout(timer);
+      };
+      const timer = setTimeout(release, timeoutMs);
+      let result;
+      try {
+        result = fn();
+      } catch (err) {
+        release();
+        throw err;
+      }
+      Promise.resolve(result).then(release, release);
+      return result;
+    },
+  };
+}
+
+// Tasks the tester skipped (controller count; older controllers report none).
+export function tasksSkipped(state) {
+  const total = state.tasks?.length || 0;
+  return Number.isFinite(state.tasksSkipped) ? clamp(state.tasksSkipped, 0, total) : 0;
+}
+
+// Stopped panel tally: "2 of 3 completed, 1 skipped".
+export function taskTally(state, opts) {
+  const total = state.tasks?.length || 0;
+  const skipped = tasksSkipped(state);
+  return `${tasksCompleted(state, opts)} of ${total} completed${skipped ? `, ${skipped} skipped` : ''}`;
+}
+
 // Accumulates time spent above the pass level; the mic check passes once the
 // tester has been audible for a moment rather than on a single spike.
 export function createMicCheck(level = MIC_PASS_LEVEL, needMs = MIC_PASS_MS) {
@@ -122,16 +190,74 @@ export function createMicCheck(level = MIC_PASS_LEVEL, needMs = MIC_PASS_MS) {
   };
 }
 
+// User-facing audio status (audio-recording-plan.md §3). 'paused' comes from
+// the session phase, which owns the badge while paused.
 export const MIC_LABELS = {
-  live: 'Microphone live',
-  muted: 'Microphone muted',
-  denied: 'Microphone blocked',
-  error: 'Microphone error',
+  live: 'Microphone on',
+  muted: 'Muted',
+  paused: 'Paused',
   pending: 'Microphone starting',
+  reconnecting: 'Reconnecting…',
+  denied: 'Microphone blocked',
+  error: 'Audio stopped',
   off: 'Microphone off',
 };
 
-export function micKind(audio) {
+export function micKind(audio, phase) {
   if (!audio || !audio.enabled) return 'off';
-  return MIC_LABELS[audio.status] ? audio.status : 'off';
+  const status = MIC_LABELS[audio.status] ? audio.status : 'off';
+  if (phase === 'paused' && (status === 'live' || status === 'muted' || status === 'pending')) return 'paused';
+  return status;
+}
+
+export const AUDIO_COPY = {
+  stopped: 'Audio stopped — screen is still recording.',
+  blocked: 'Microphone blocked — screen is still recording.',
+  blockedHelp: 'Open your browser’s site settings for this page (the icon at the left of the address bar), set Microphone to Allow, then choose Try again.',
+  reconnecting: 'Reconnecting microphone…',
+  off: 'Microphone off — screen is still recording.',
+  deviceChanged: 'Your microphone devices changed. If your voice isn’t being picked up, retry the microphone.',
+  paused: 'Session paused — prototype interaction and voice are not saved.',
+  pausedMic: 'Your browser may still show the microphone as in use until you stop the session.',
+};
+
+/**
+ * Which recovery notice the recording view shows, if any:
+ * 'stopped' (recoverable: Retry) | 'blocked' (site settings) |
+ * 'reconnecting' | 'off' (tester chose to continue without the mic) | null.
+ */
+export function audioNotice(audio) {
+  if (!audio?.enabled) return null;
+  switch (audio.status) {
+    case 'error': return 'stopped';
+    case 'denied': return 'blocked';
+    case 'reconnecting': return 'reconnecting';
+    case 'off': return audio.stopAsking ? 'off' : null;
+    default: return null;
+  }
+}
+
+// What a status change should say through the live region (heard even with
+// the panel collapsed, so a think-aloud tester notices the mic dying).
+export function audioAnnouncement(prev, next) {
+  const from = prev?.status;
+  const to = next?.status;
+  if (!next?.enabled || from === to) return null;
+  switch (to) {
+    case 'error': return AUDIO_COPY.stopped;
+    case 'denied': return AUDIO_COPY.blocked;
+    case 'reconnecting': return AUDIO_COPY.reconnecting;
+    case 'live': return from === 'reconnecting' || from === 'error' || from === 'denied' ? 'Microphone on again.' : null;
+    default: return null;
+  }
+}
+
+// Pre-download line: exactly one of the three verdicts (controller.savedAudio).
+export function savedAudioText(saved) {
+  if (!saved?.label) return null;
+  if (saved.kind === 'gaps') {
+    const secs = Math.max(1, Math.round((saved.gapMs || 0) / 1000));
+    return `${saved.label} (${saved.gaps} gap${saved.gaps === 1 ? '' : 's'}, about ${secs} s). ${GAPS_MEANING}`;
+  }
+  return saved.label;
 }

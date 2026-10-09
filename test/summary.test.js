@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  audioGaps, buildSummary, buildTaskSpans, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
-  detectRageClicks, formatDuration, formatTrailLine, overlapMs, pausedSpans, shortUrl,
+  audioGaps, audioReport, buildSummary, buildTaskSpans, GAPS_MEANING, LOST_SEGMENT_REASON, collapseTrail, describeBrowser, detectBacktracking, detectIdle,
+  detectRageClicks, formatDuration, formatTrailLine, overlapMs, pagesVisited, pausedSpans, shortUrl, taskCounts, taskStatus,
 } from '../src/export/summary.js';
 
 const T = 1_760_000_000_000;
@@ -169,7 +169,6 @@ test('formatTrailLine formats each kind compactly', () => {
   assert.equal(formatTrailLine({ ts: at(3), type: 'click', selector: 'div.card', text: '' }, at(0)), '00:03 click div.card');
   assert.equal(formatTrailLine({ ts: at(3), type: 'input', selector: '#e', value: '***', edits: 5 }, at(0)), '00:03 input #e = "***" (5 edits)');
   assert.equal(formatTrailLine({ ts: at(3), type: 'nav', navType: 'pushState', to: 'https://x.test/a?b=1' }, at(0), 'https://x.test/'), '00:03 nav pushState /a?b=1');
-  assert.equal(formatTrailLine({ ts: at(3), type: 'error', message: 'Boom' }, at(0)), '00:03 error "Boom"');
   assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 1500 }, at(0)), '00:03 audio-gap 1.5s');
   assert.equal(formatTrailLine({ ts: at(3), type: 'pause' }, at(0)), '00:03 pause');
   assert.equal(formatTrailLine({ ts: at(3), type: 'click', selector: '#q', text: 'Say "hi"\n  now' }, at(0)), '00:03 click #q "Say \\"hi\\" now"');
@@ -261,7 +260,10 @@ test('buildSummary: per-task details, trail, and signals', () => {
   assert.ok(task1.includes('  - Answer: "The filter was empty"'));
   assert.ok(task1.includes('00:01 click input#q'));
   assert.ok(task1.includes('00:02 input input#q = "***" (2 edits)'));
-  assert.ok(task1.includes('- 00:05 error: TypeError: x is undefined (at f (app.js:1:2)) on /proto/'));
+  // Page errors are a code concern, not a usability one: never in the summary.
+  assert.ok(!task1.includes('TypeError'), task1);
+  assert.ok(!task1.includes('### Errors'));
+  assert.ok(!task1.includes('- Errors:'));
   assert.ok(task1.includes('- Rage click: 3× on button#apply "Apply" at 00:04'));
   assert.ok(task1.includes('- Long idle: 00:34 without logged interaction from 00:05'));
   assert.ok(task1.includes('- Time limit exceeded: 00:39 vs 00:30'));
@@ -276,8 +278,8 @@ test('buildSummary: per-task details, trail, and signals', () => {
 test('buildSummary: unreached tasks and session-level section', () => {
   const md = buildSummary(fixture());
   assert.ok(md.includes('## Tasks not reached\n\n- never: Checkout'));
-  assert.ok(md.includes('- Errors outside tasks: 1'));
-  assert.ok(md.includes('rejection: Unhandled: nope'));
+  assert.ok(!md.includes('Errors outside tasks'));
+  assert.ok(!md.includes('Unhandled: nope'));
   assert.ok(md.includes('- Audio gaps: 1 (1.2s total; mm:ss from session start)'));
   assert.ok(md.includes('- Pauses: 1 (00:18 total)'));
 });
@@ -400,4 +402,107 @@ test('buildSummary: per-task audio gap signal from coverage', () => {
   const log = [{ ts: at(1), type: 'task-start', taskId: 't' }, { ts: at(40), type: 'task-end', taskId: 't', completed: true }];
   const md = buildSummary({ session, log, audio: [{ startTs: at(0), endTs: at(20) }, { startTs: at(22), endTs: at(40) }] });
   assert.ok(md.includes('- Audio gap: 2.0s from 00:19'), md);
+});
+
+test('audioGaps: saved segments count even when an older record says enabled:false', () => {
+  const session = { audio: { enabled: false } };
+  const gaps = audioGaps({ session, audio: [{ startTs: at(0), endTs: at(20) }], start: at(0), end: at(30) });
+  assert.deepEqual(gaps.map((g) => [g.start, g.end]), [[at(20), at(30)]]);
+});
+
+test('audioReport: one verdict from persisted segments, pauses excluded, 500 ms threshold', () => {
+  const session = { startedAt: at(0), endedAt: at(30), audio: { enabled: true } };
+  const pausedLog = [{ ts: at(10), type: 'pause' }, { ts: at(15), type: 'resume' }];
+  const full = audioReport({ session, log: pausedLog, audio: [{ startTs: at(0), endTs: at(10) }, { startTs: at(15.4), endTs: at(30) }] });
+  assert.deepEqual([full.kind, full.label, full.gaps.length], ['recorded', 'Audio recorded', 0]);
+  const gappy = audioReport({ session, log: [], audio: [{ startTs: at(0), endTs: at(10) }, { startTs: at(12), endTs: at(30) }] });
+  assert.deepEqual([gappy.kind, gappy.label, gappy.gapMs], ['gaps', 'Audio recorded with gaps', 2000]);
+  const none = audioReport({ session, log: [], audio: [] });
+  assert.deepEqual([none.kind, none.label, none.gaps], ['none', 'No audio recorded', []]);
+});
+
+test('audioReport: denied on page 3 after audio on pages 1–2 is "with gaps", never "not recorded"', () => {
+  const session = { study: 's', startedAt: at(0), endedAt: at(90), audio: { enabled: false } }; // older record
+  const log = [{ ts: at(60), type: 'audio-gap', gapStart: at(60), gapMs: null, message: 'Microphone unavailable: Microphone access was denied' }];
+  const audio = [{ startTs: at(0), endTs: at(30) }, { startTs: at(30.3), endTs: at(60) }];
+  const report = audioReport({ session, log, audio });
+  assert.equal(report.label, 'Audio recorded with gaps');
+  assert.equal(report.gaps[0].reason, 'Microphone unavailable: Microphone access was denied');
+  const md = buildSummary({ session, log, audio });
+  assert.ok(md.includes(`- Audio saved: Audio recorded with gaps (${GAPS_MEANING})`), md);
+  assert.ok(!md.includes('not recorded'), md);
+});
+
+test('buildSummary: seq problems are surfaced; a dropped segment explains its gap', () => {
+  const session = { study: 's', startedAt: at(0), endedAt: at(30), audio: { enabled: true } };
+  const audio = [{ startTs: at(0), endTs: at(10), seqGaps: [3] }, { startTs: at(20), endTs: at(30) }];
+  const dropped = [{ startTs: at(10), endTs: at(20), reason: 'missing-first-chunk' }];
+  const md = buildSummary({ session, log: [], audio, audioDropped: dropped });
+  assert.ok(md.includes('- Unreliable audio segments: 1 (missing chunks; playback may stop early)'), md);
+  assert.ok(md.includes('- Lost audio segments: 1'), md);
+  assert.ok(md.includes(LOST_SEGMENT_REASON), md);
+  const none = buildSummary({ session, log: [], audio: [] });
+  assert.ok(none.includes('- Audio saved: No audio recorded'), none);
+});
+
+test('skipped tasks: status Skipped, never Completed, and counted separately', () => {
+  const tasks = [{ id: 't1', prompt: 'One' }, { id: 't2', prompt: 'Two' }, { id: 't3', prompt: 'Three' }];
+  const session = { tasks, startedAt: at(0), endedAt: at(30), tasksCompleted: 2, tasksSkipped: 1 };
+  const log = [
+    { ts: at(1), type: 'task-start', taskId: 't1' },
+    { ts: at(5), type: 'task-end', taskId: 't1', completed: true },
+    { ts: at(5), type: 'task-start', taskId: 't2' },
+    { ts: at(9), type: 'task-end', taskId: 't2', completed: false, reason: 'skipped' },
+    { ts: at(9), type: 'task-start', taskId: 't3' },
+    { ts: at(20), type: 'task-end', taskId: 't3', completed: true },
+    { ts: at(20), type: 'session-end', taskId: null },
+  ];
+  const spans = buildTaskSpans({ session, log });
+  assert.deepEqual(spans.map((sp) => [sp.taskId, sp.completed, sp.skipped]), [['t1', true, false], ['t2', false, true], ['t3', true, false]]);
+  assert.equal(taskStatus(spans[1]), 'Skipped');
+  assert.deepEqual(taskCounts(spans, tasks), { done: 2, total: 3, skipped: 1 });
+  const md = buildSummary({ session, log });
+  assert.ok(md.includes('- Tasks completed: 2 of 3, 1 skipped'), md);
+  assert.ok(md.slice(md.indexOf('## Task 2'), md.indexOf('## Task 3')).includes('- Status: Skipped'));
+  // No skips: the line reads as before.
+  assert.ok(buildSummary({ session, log: log.filter((e) => e.reason !== 'skipped') }).includes('- Tasks completed: 2 of 3\n'));
+});
+
+test('skipped is read from rrweb custom events too', () => {
+  const events = [
+    { type: 5, timestamp: at(1), data: { tag: 'testkit:task-start', payload: { taskId: 't1', index: 0 } } },
+    { type: 5, timestamp: at(9), data: { tag: 'testkit:task-end', payload: { taskId: 't1', index: 0, completed: false, reason: 'skipped' } } },
+  ];
+  const [span] = buildTaskSpans({ session: { tasks: [{ id: 't1' }] }, log: [], events });
+  assert.equal(span.skipped, true);
+  assert.equal(span.completed, false);
+});
+
+test('sub-threshold audio-gap entries are labelled, and "none" names the threshold', () => {
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 200 }, at(0)), '00:03 audio-gap 0.2s (under 0.5s, not counted as a gap)');
+  assert.equal(formatTrailLine({ ts: at(3), type: 'audio-gap', gapMs: 500 }, at(0)), '00:03 audio-gap 0.5s');
+  const session = { study: 's', startedAt: at(0), endedAt: at(10), audio: { enabled: true }, tasks: [{ id: 't', prompt: 'P' }] };
+  const log = [{ ts: at(0), type: 'task-start', taskId: 't' }, { ts: at(4), type: 'audio-gap', taskId: 't', gapStart: at(4), gapMs: 400 }];
+  const audio = [{ audioSegmentId: 'a', startTs: at(0), endTs: at(10) }];
+  const md = buildSummary({ session, log, audio });
+  assert.ok(md.includes('- Audio gaps: none of 0.5s or more'), md);
+  assert.ok(md.includes('audio-gap 0.4s (under 0.5s, not counted as a gap)'), md);
+});
+
+test('Pages visited starts with the start page and folds query-only replaceState rewrites', () => {
+  const base = 'https://app.test/list';
+  const session = { study: 's', startedAt: at(0), endedAt: at(30), meta: { prototypeUrl: base } };
+  const nav = (s, navType, to) => ({ ts: at(s), type: 'nav', navType, from: null, to, url: to });
+  const log = [
+    nav(2, 'pushState', 'https://app.test/item?title=A'),
+    nav(3, 'replaceState', 'https://app.test/item?title=A%20B'), // host syncs state into the query
+    nav(4, 'replaceState', 'https://app.test/item?title=A%20B%20C'),
+    nav(5, 'beforeunload', null),
+    nav(6, 'pushState', 'https://app.test/settings'),
+    nav(7, 'replaceState', 'https://app.test/other'), // a different path is a new page
+  ];
+  assert.deepEqual(pagesVisited({ session, log, baseUrl: base }), ['/list', '/item?title=A%20B%20C', '/settings', '/other']);
+  assert.ok(buildSummary({ session, log }).includes('- Pages visited: /list, /item?title=A%20B%20C, /settings, /other'));
+  // No navigations at all: the start page is still listed.
+  assert.ok(buildSummary({ session, log: [] }).includes('- Pages visited: /list'));
 });

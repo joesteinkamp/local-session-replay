@@ -1,5 +1,5 @@
 // Decides whether TestKit records on this page load. Shared by the script-tag
-// loader (src/loader.js) and the package entry (src/index.js), so it must stay
+// loader (src/loader.js) and the package entries (src/boot.js), so it must stay
 // tiny: casual viewers download it.
 
 // Per-study pointer `{ id, study, lastActivityAt }` written by testkit-core's
@@ -29,10 +29,26 @@ function hasFreshSession(study) {
   }
 }
 
+// The `test` param as it was when this module was first evaluated. A client
+// router can redirect `/?test=1` to a route without the param before the
+// React component's effect (or a late init()) reads the URL; the snapshot
+// still counts it. One page load = one claim, so a snapshot taken on this page
+// load stays valid however much later TestKit mounts. Null on the server.
+const testParam = (search) => new URLSearchParams(search).get('test');
+function snapshotTestParam() {
+  try {
+    return typeof window === 'undefined' || typeof location === 'undefined' ? null : testParam(location.search);
+  } catch {
+    return null;
+  }
+}
+const initialTest = snapshotTestParam();
+
 export function isActivated(config) {
   const activate = config.activate ?? 'query';
-  const params = new URLSearchParams(location.search);
-  if (params.get('test') === '0') return false;
+  const live = testParam(location.search);
+  // An explicit ?test=0, now or at first import, always wins.
+  if (live === '0' || initialTest === '0') return false;
   if (hasFreshSession(studyOf(config))) return true; // this study has a session in progress: survive navigation
   if (typeof activate === 'function') {
     // A throwing predicate must not abort the host's TestKit.init() call.
@@ -43,5 +59,5 @@ export function isActivated(config) {
     }
   }
   if (typeof activate === 'boolean') return activate;
-  return params.get('test') === '1';
+  return live === '1' || (live === null && initialTest === '1');
 }

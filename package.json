@@ -9,10 +9,21 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
     "./script/*": "./dist/script/*",
     "./package.json": "./package.json"
   },
   "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "react": [
+        "./dist/react.d.ts"
+      ]
+    }
+  },
   "files": [
     "dist"
   ],
@@ -24,12 +35,30 @@
     "dev": "node scripts/build.mjs --watch",
     "serve": "node scripts/build.mjs && python3 -m http.server 8080 --bind 0.0.0.0 --directory public",
     "test": "node --test 'test/*.test.js'",
-    "prepare": "npm run build"
+    "test:browser": "node scripts/build.mjs && node test/browser/run.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "prepare": "npm run build",
+    "example:react": "npm run build && npm install --prefix examples/react && npm run dev --prefix examples/react"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
   },
   "license": "MIT",
   "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright-core": "^1.64.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "rrweb": "2.1.7",
-    "rrweb-player": "2.1.7",
-    "esbuild": "0.28.2"
+    "rrweb-player": "2.1.7"
   }
 }

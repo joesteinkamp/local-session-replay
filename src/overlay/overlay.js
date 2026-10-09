@@ -3,10 +3,13 @@
 // position, open/collapsed, pre-flight checkbox progress, confirms, follow-up draft.
 import CSS from './styles.css';
 import {
+  AUDIO_COPY,
   EDGE_MARGIN,
   MIC_LABELS,
   MIC_PASS_LEVEL,
+  canSkipTask,
   canStart,
+  createAdvanceGuard,
   clamp,
   consentText,
   createMicCheck,
@@ -16,11 +19,17 @@ import {
   formatCountdown,
   formatElapsed,
   hasMovedPastThreshold,
+  audioAnnouncement,
+  audioNotice,
   micKind,
   parsePosition,
+  previousDownloadText,
+  savedAudioText,
   snapPosition,
   taskRemainingMs,
+  taskTally,
   tasksCompleted,
+  tasksSkipped,
 } from './model.js';
 
 const POS_KEY = 'testkit:overlay-pos';
@@ -140,15 +149,18 @@ function mount(controller) {
   });
   const ui = {
     pre: freshPreflight(),
-    confirm: null, // 'stop' | 'discard'
+    confirm: null, // 'stop' | 'discard' | 'new' (start over from an undownloaded session)
     followUpFor: null, // taskIndex whose follow-up question is showing
     followUpText: '',
     exporting: false,
     exportResult: null,
     exportError: null,
     actionError: null,
+    micHelp: false, // "How to allow microphone" expanded
+    retrying: false,
     timeUp: false,
     finishedLast: false, // tester pressed Finish on the last task (this page load)
+    skipped: false, // the task change in flight came from Skip task
     focusNext: null, // data-fid to focus after the next render
     forceFocus: false, // focus even if focus wasn't inside the overlay
   };
@@ -247,6 +259,10 @@ function mount(controller) {
     const wasLocked = otherTab(prev);
     if (prev.phase !== next.phase) onPhaseChange(prev.phase, next.phase);
     else if (prev.taskIndex !== next.taskIndex && ACTIVE.has(next.phase)) onTaskChange();
+    if (ACTIVE.has(next.phase) && prev.phase === next.phase && !otherTab(next)) {
+      const said = audioAnnouncement(prev.audio, next.audio);
+      if (said) announce(said);
+    }
     if (otherTab() && !wasLocked) {
       ui.confirm = null;
       ui.followUpFor = null;
@@ -282,6 +298,7 @@ function mount(controller) {
       announce('Before you start: review consent and check your microphone.');
     } else if (to === 'recording') {
       if (from === 'paused') {
+        if (shadow.activeElement?.dataset?.fid === 'resume') ui.focusNext = 'pause';
         announce('Recording resumed.');
       } else {
         ui.timeUp = false;
@@ -290,14 +307,21 @@ function mount(controller) {
         announce(`Recording started. ${taskAnnouncement()}`);
       }
     } else if (to === 'paused') {
+      // The toggle's data-fid follows its label; keep focus on it.
+      if (shadow.activeElement?.dataset?.fid === 'pause') ui.focusNext = 'resume';
       announce('Recording paused.');
+    } else if (to === 'stopped' && from === 'preflight') {
+      // Setup cancelled: back to the session it was started from.
+      ui.focusNext = 'new-session';
+      announce('Setup cancelled. The previous session is still here.');
     } else if (to === 'stopped' && from !== 'exporting') {
       ui.followUpFor = null;
       ui.followUpText = '';
       ui.focusNext = 'download';
       open = true;
-      announce('Session stopped. Download the session file to keep it.');
+      announce(ui.skipped ? 'Task skipped. Session complete. Download the session file to keep it.' : 'Session stopped. Download the session file to keep it.');
     }
+    ui.skipped = false;
     writeStorage('sessionStorage', OPEN_KEY, open ? '1' : '0');
   }
 
@@ -307,7 +331,8 @@ function mount(controller) {
     ui.timeUp = false;
     ui.confirm = null;
     ui.focusNext = 'next';
-    announce(taskAnnouncement());
+    announce(`${ui.skipped ? 'Task skipped. ' : ''}${taskAnnouncement()}`);
+    ui.skipped = false;
   }
 
   // ---- Actions ----
@@ -348,19 +373,41 @@ function mount(controller) {
   function skipAudio() {
     ui.pre.audioSkipped = true;
     stopMeter();
-    announce('Continuing without audio.');
+    announce('Continuing without audio. Only your screen will be recorded.');
     ui.focusNext = 'use-mic';
     render();
   }
 
+  // Coming back to voice after "Continue without audio" needs the voice
+  // consent again and a fresh pass (or skip) of the mic check.
   function useMicAgain() {
     ui.pre.audioSkipped = false;
+    ui.pre.consent = false;
+    ui.pre.micPassed = false;
     ui.focusNext = 'test-mic';
     if (ui.pre.mic === 'ok') {
-      ui.focusNext = 'start-session';
+      ui.focusNext = 'consent';
       startMeter();
     }
     render();
+  }
+
+  function retryMic() {
+    if (ui.retrying) return;
+    ui.retrying = true;
+    ui.micHelp = false;
+    render();
+    const done = guard(() => {
+      ui.retrying = false;
+      render();
+    });
+    act(() => Promise.resolve(controller.retryMic?.()).finally(done));
+  }
+
+  function continueWithoutMic() {
+    ui.micHelp = false;
+    announce('Continuing without microphone. The screen is still recording.');
+    act(() => controller.continueWithoutMic?.());
   }
 
   function startSession() {
@@ -368,7 +415,12 @@ function mount(controller) {
     act(() => controller.start({ consent: true, audio }));
   }
 
-  function onNext() {
+  // The second click of a double click (event.detail 2+) may land on the next
+  // task's freshly rendered button; it is never a separate decision.
+  const repeatClick = (e) => Number(e?.detail) > 1;
+
+  function onNext(e) {
+    if (repeatClick(e)) return;
     const task = currentTask();
     if (task?.followUp && ui.followUpFor !== state.taskIndex) {
       ui.followUpFor = state.taskIndex;
@@ -382,13 +434,44 @@ function mount(controller) {
       return;
     }
     markIfLast();
-    act(() => controller.nextTask({}));
+    advanceOnce((taskIndex) => controller.nextTask({ taskIndex }));
   }
 
-  function submitFollowUp(skip) {
+  function submitFollowUp(skip, e) {
+    if (repeatClick(e)) return;
     const answer = skip ? undefined : ui.followUpText.trim();
     markIfLast();
-    act(() => controller.nextTask(answer ? { followUpAnswer: answer } : {}));
+    advanceOnce((taskIndex) => controller.nextTask(answer ? { followUpAnswer: answer, taskIndex } : { taskIndex }));
+  }
+
+  // One task change per click: a double click (or a second press before the
+  // controller answers) must not advance twice. The controller also ignores a
+  // call whose taskIndex is no longer current.
+  const advanceGuard = createAdvanceGuard();
+  function advanceOnce(fn) {
+    const taskIndex = state.taskIndex;
+    advanceGuard.run(() => act(() => fn(taskIndex)));
+  }
+
+  // Secondary to Next: the task ends as skipped, not completed; no follow-up.
+  function onSkip(e) {
+    if (repeatClick(e)) return;
+    ui.skipped = true;
+    ui.finishedLast = false;
+    advanceOnce((taskIndex) => controller.skipTask({ taskIndex }));
+  }
+
+  // A full download (audio included) counts; a visual-only one doesn't.
+  const downloadedFully = () => Boolean(state.downloaded || (ui.exportResult && !ui.exportResult.withoutAudio));
+  const downloadedVisualOnly = () => !downloadedFully() && Boolean(state.downloadedWithoutAudio || ui.exportResult?.withoutAudio);
+
+  // From a downloaded session this goes straight to setup; otherwise ask first.
+  function onNewSession() {
+    if (downloadedFully()) {
+      act(() => controller.beginPreflight());
+      return;
+    }
+    askConfirm('new');
   }
 
   function markIfLast() {
@@ -408,11 +491,26 @@ function mount(controller) {
   function cancelConfirm() {
     const kind = ui.confirm;
     ui.confirm = null;
-    ui.focusNext = kind === 'discard' ? 'discard' : 'stop';
+    ui.focusNext = kind === 'discard' ? 'discard' : kind === 'new' ? 'new-session' : 'stop';
     render();
   }
 
-  function doExport() {
+  // Package build: Chrome keeps a failed player chunk import for the life of
+  // the page, so retrying means a reload. ?test=1 brings the overlay back and
+  // the stopped session restores from testkit:last.
+  function reloadForExport() {
+    writeStorage('sessionStorage', OPEN_KEY, '1');
+    announce('Reloading the page. Your session is saved.');
+    const url = new URL(location.href);
+    url.searchParams.set('test', '1');
+    location.assign(url.href);
+  }
+
+  function doExport(options) {
+    if (state.exportNeedsReload) {
+      reloadForExport();
+      return;
+    }
     if (ui.exporting) return;
     ui.exporting = true;
     ui.exportError = null;
@@ -424,7 +522,7 @@ function mount(controller) {
       render();
     });
     try {
-      Promise.resolve(controller.exportSession())
+      Promise.resolve(options ? controller.exportSession(options) : controller.exportSession())
         .then(
           (res) => {
             ui.exportResult = res || {};
@@ -463,7 +561,6 @@ function mount(controller) {
       }
       if (!ui.pre.micPassed && micCheck.sample(level, t)) {
         ui.pre.micPassed = true;
-        // The focused "Continue without audio" button disappears on pass.
         ui.focusNext = ui.pre.consent ? 'start-session' : 'consent';
         announce('Microphone check passed. We can hear you.');
         render();
@@ -483,6 +580,9 @@ function mount(controller) {
     return JSON.stringify([
       state.phase, state.taskIndex, state.tasks?.length, state.study, state.muted,
       state.audio?.enabled, state.audio?.status, state.audio?.error ? String(state.audio.error) : null,
+      state.audio?.stopAsking, state.audio?.deviceChanged, state.savedAudio, state.exportWithoutAudio,
+      state.downloaded, state.downloadedWithoutAudio, state.exportNeedsReload, state.previousDownloadedAt, state.tasksCompleted, state.tasksSkipped,
+      ui.micHelp, ui.retrying,
       state.error ? String(state.error) : null, state.taskStartedAt, state.otherTab === true,
       open, ui.pre, ui.confirm, ui.followUpFor, ui.exporting, ui.exportResult, ui.exportError,
       ui.actionError, ui.timeUp,
@@ -546,8 +646,8 @@ function mount(controller) {
   }
 
   function micIndicator() {
-    const kind = micKind(state.audio);
-    const off = kind !== 'live' && kind !== 'pending';
+    const kind = micKind(state.audio, state.phase);
+    const off = kind !== 'live' && kind !== 'pending' && kind !== 'reconnecting';
     return h(
       'span',
       { class: `tk-mic is-${kind}`, title: MIC_LABELS[kind] },
@@ -741,7 +841,8 @@ function mount(controller) {
         pre.micPassed
           ? notice('✓ We can hear you. Your microphone is working.', 'ok')
           : h('p', { class: 'tk-p is-strong', text: 'Say something — the check passes once we hear you.' }),
-        pre.micPassed ? null : h('div', { class: 'tk-row' }, btn('Continue without audio', { fid: 'skip-audio', onclick: skipAudio })),
+        // Stays available after a pass: choosing it switches to screen-only consent.
+        h('div', { class: 'tk-row' }, btn('Continue without audio', { fid: 'skip-audio', onclick: skipAudio })),
       );
     }
     return h('div', { class: 'tk-card', role: 'group', 'aria-labelledby': 'tk-mic-h' }, ...parts);
@@ -755,8 +856,10 @@ function mount(controller) {
     if (!ui.pre.consent) needs.push('check the consent box');
     if (audioEnabled && !ui.pre.micPassed && !ui.pre.audioSkipped) needs.push('pass the microphone check (or continue without audio)');
 
+    const previous = previousDownloadText(state.previousDownloadedAt);
     return [
       h('h2', { class: 'tk-h', text: 'Before you start' }),
+      previous ? h('p', { class: 'tk-notice', 'data-previous-download': '' }, previous) : null,
       h('p', { class: 'tk-p is-strong', id: 'tk-consent-text', text: consentText(withAudio) }),
       h(
         'label',
@@ -828,13 +931,11 @@ function mount(controller) {
       );
     }
 
-    if (paused) out.push(notice('Recording is paused. Nothing is captured until you resume.', 'warn'));
-    if (audio.enabled && (audio.status === 'denied' || audio.status === 'error')) {
-      out.push(notice(
-        `Microphone unavailable${audio.error ? ` (${errorMessage(audio.error)})` : ''} — audio isn’t being recorded.`,
-        'warn',
-      ));
+    if (paused) {
+      const holdsMic = audio.enabled && !audio.stopAsking && audio.status !== 'off';
+      out.push(h('p', { class: 'tk-notice is-warn' }, AUDIO_COPY.paused, holdsMic ? h('br') : null, holdsMic ? AUDIO_COPY.pausedMic : null));
     }
+    out.push(...audioRecovery(audio));
 
     if (showFollowUp) {
       out.push(h(
@@ -857,20 +958,25 @@ function mount(controller) {
       actions.push(h(
         'div',
         { class: 'tk-row' },
-        btn('Skip', { fid: 'followup-skip', onclick: () => submitFollowUp(true) }),
+        btn('Skip', { fid: 'followup-skip', onclick: (e) => submitFollowUp(true, e) }),
         btn(isLast ? 'Submit and finish' : 'Submit and continue', {
           variant: 'is-primary is-grow',
           fid: 'followup-submit',
-          onclick: () => submitFollowUp(false),
+          onclick: (e) => submitFollowUp(false, e),
         }),
       ));
     } else {
-      actions.push(h('div', { class: 'tk-row' }, btn(total ? (isLast ? 'Finish' : 'Next task') : 'Finish session', {
-        variant: 'is-primary is-grow',
-        fid: 'next',
-        disabled: paused,
-        onclick: onNext,
-      })));
+      actions.push(h(
+        'div',
+        { class: 'tk-row' },
+        canSkipTask(state) ? btn('Skip task', { fid: 'skip-task', disabled: paused, onclick: onSkip }) : null,
+        btn(total ? (isLast ? 'Finish' : 'Next task') : 'Finish session', {
+          variant: 'is-primary is-grow',
+          fid: 'next',
+          disabled: paused,
+          onclick: onNext,
+        }),
+      ));
     }
 
     if (ui.confirm === 'stop') {
@@ -886,11 +992,11 @@ function mount(controller) {
         ),
       ));
     } else {
-      const canMute = audio.enabled && (audio.status === 'live' || audio.status === 'muted');
+      const canMute = audio.enabled && (audio.status === 'live' || audio.status === 'muted' || audio.status === 'pending');
       actions.push(h(
         'div',
         { class: 'tk-row' },
-        btn(paused ? 'Resume' : 'Pause', { fid: 'pause', onclick: togglePause }),
+        btn(paused ? 'Resume' : 'Pause', { fid: paused ? 'resume' : 'pause', onclick: togglePause }),
         canMute
           ? btn(state.muted ? 'Unmute' : 'Mute', { fid: 'mute', disabled: paused, onclick: () => act(() => controller.toggleMute()) })
           : null,
@@ -902,21 +1008,72 @@ function mount(controller) {
     return out;
   }
 
+  // Recovery notice + controls for the mic; visual recording is unaffected.
+  function audioRecovery(audio) {
+    const kind = audioNotice(audio);
+    const detail = audio.error ? h('span', { class: 'tk-notice-detail' }, ` (${errorMessage(audio.error)})`) : null;
+    const quietRow = (...buttons) => h('div', { class: 'tk-row' }, ...buttons);
+    const without = btn('Continue without microphone', { fid: 'mic-without', onclick: continueWithoutMic });
+    switch (kind) {
+      case 'stopped':
+        return [
+          h('p', { class: 'tk-notice is-error' }, AUDIO_COPY.stopped, detail),
+          quietRow(btn('Retry microphone', { variant: 'is-primary', fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic }), without),
+        ];
+      case 'blocked':
+        return [
+          h('p', { class: 'tk-notice is-error' }, AUDIO_COPY.blocked),
+          ui.micHelp
+            ? h('div', { class: 'tk-card' },
+              h('p', { class: 'tk-p', id: 'tk-mic-help', text: AUDIO_COPY.blockedHelp }),
+              quietRow(btn('Try again', { variant: 'is-primary', fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic })))
+            : null,
+          quietRow(
+            ui.micHelp ? null : btn('How to allow microphone', {
+              variant: 'is-primary',
+              fid: 'mic-help',
+              'aria-expanded': 'false',
+              onclick: () => {
+                ui.micHelp = true;
+                ui.focusNext = 'mic-retry';
+                render();
+              },
+            }),
+            without,
+          ),
+        ];
+      case 'reconnecting':
+        return [h('p', { class: 'tk-notice is-warn tk-inline' }, h('span', { class: 'tk-spinner', 'aria-hidden': 'true' }), AUDIO_COPY.reconnecting)];
+      case 'off':
+        return [
+          h('p', { class: 'tk-notice' }, AUDIO_COPY.off),
+          quietRow(btn('Turn microphone back on', { fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic })),
+        ];
+      default:
+        if (audio.enabled && audio.deviceChanged && (audio.status === 'live' || audio.status === 'muted')) {
+          return [h('p', { class: 'tk-notice' }, AUDIO_COPY.deviceChanged), quietRow(btn('Retry microphone', { fid: 'mic-retry', disabled: ui.retrying, onclick: retryMic }))];
+        }
+        return [];
+    }
+  }
+
   function stoppedView() {
     const total = state.tasks?.length || 0;
     const done = tasksCompleted(state, { finishedLast: ui.finishedLast });
     const exporting = ui.exporting || state.phase === 'exporting';
     const res = ui.exportResult;
+    const downloaded = downloadedFully();
+    const visualOnly = downloadedVisualOnly();
     const out = [
-      h('h2', { class: 'tk-h', text: total && done >= total ? 'Session complete' : 'Session stopped' }),
+      h('h2', { class: 'tk-h', text: total && done + tasksSkipped(state) >= total ? 'Session complete' : 'Session stopped' }),
       h(
         'dl',
         { class: 'tk-meta' },
         h('dt', { text: 'Study' }), h('dd', { text: state.study || 'Untitled study' }),
         h('dt', { text: 'Duration' }),
         h('dd', {}, h('span', { 'aria-hidden': 'true', text: formatElapsed(state.elapsedMs) }), h('span', { class: 'tk-sr', text: describeDuration(state.elapsedMs) })),
-        total ? h('dt', { text: 'Tasks done' }) : null,
-        total ? h('dd', { text: `${done} of ${total}` }) : null,
+        total ? h('dt', { text: 'Tasks' }) : null,
+        total ? h('dd', { text: taskTally(state, { finishedLast: ui.finishedLast }) }) : null,
       ),
     ];
 
@@ -925,23 +1082,70 @@ function mount(controller) {
       // We only know the download was handed to the browser, not that it landed.
       out.push(notice(`Download started: ${res.filename || 'session file'}${size}. Check your downloads folder; if it isn’t there, use Download again.`, 'ok'));
     }
-    if (ui.exportError && !exporting) out.push(notice(`Export failed: ${ui.exportError}`, 'error'));
+    const saved = savedAudioText(state.savedAudio);
+    if (saved) out.push(h('p', { class: `tk-notice${state.savedAudio.kind === 'recorded' ? ' is-ok' : state.savedAudio.kind === 'gaps' ? ' is-warn' : ''}`, 'data-saved-audio': state.savedAudio.kind }, saved));
+    // The controller's message already starts with "Export failed:" (or is the
+    // exact audio-too-large copy); don't prefix it twice.
+    if (ui.exportError && !exporting) out.push(notice(/^Export failed/.test(ui.exportError) || state.exportWithoutAudio || state.exportNeedsReload ? ui.exportError : `Export failed: ${ui.exportError}`, 'error'));
     if (!res && !exporting && !ui.exportError) {
-      out.push(h('p', { class: 'tk-p', text: 'The recording is saved in this browser until you download or discard it.' }));
+      let text = 'The recording is saved in this browser until you download or discard it.';
+      if (state.downloaded) text = 'You downloaded this session earlier. It stays in this browser until you discard it or start a new session.';
+      else if (state.downloadedWithoutAudio) text = 'You downloaded this session without its audio. The audio is saved only in this browser until you discard it.';
+      out.push(h('p', { class: 'tk-p', text }));
     }
 
     out.push(h('div', { class: 'tk-row' }, btn(
       exporting
         ? [h('span', { class: 'tk-spinner', 'aria-hidden': 'true' }), 'Preparing file…']
-        : res ? 'Download again' : (ui.exportError ? 'Try download again' : 'Download session file'),
+        : state.exportNeedsReload ? 'Reload and retry'
+          : res ? 'Download again' : (ui.exportError ? 'Try download again' : 'Download session file'),
       {
         variant: 'is-primary is-grow',
         fid: 'download',
         disabled: exporting,
         'aria-busy': exporting ? 'true' : null,
-        onclick: doExport,
+        onclick: () => doExport(),
       },
     )));
+    if (state.exportWithoutAudio && !state.exportNeedsReload && !exporting) {
+      out.push(h('div', { class: 'tk-row' }, btn('Download without audio', { fid: 'download-visual', onclick: () => doExport({ withoutAudio: true }) })));
+    }
+
+    if (ui.confirm === 'new') {
+      out.push(h(
+        'div',
+        { class: 'tk-card', role: 'group', 'aria-labelledby': 'tk-new-q' },
+        h('p', { class: 'tk-p is-strong', id: 'tk-new-q', text: visualOnly
+          ? 'This session’s audio wasn’t downloaded: the file you saved has no audio. Try downloading it with audio before starting a new one, or discard it.'
+          : 'This session hasn’t been downloaded. Download it before starting a new one, or discard it.' }),
+        h(
+          'div',
+          { class: 'tk-row is-end' },
+          btn('Cancel', { fid: 'confirm-cancel', onclick: cancelConfirm }),
+          btn('Discard and start new', {
+            variant: 'is-danger',
+            fid: 'confirm-discard-new',
+            onclick: () => act(() => Promise.resolve(controller.discard()).then(() => controller.beginPreflight())),
+          }),
+          btn(visualOnly ? 'Try with audio' : 'Download first', {
+            variant: 'is-primary',
+            fid: 'confirm-download',
+            onclick: () => {
+              ui.confirm = null;
+              ui.focusNext = 'new-session';
+              doExport();
+            },
+          }),
+        ),
+      ));
+    } else {
+      out.push(h('div', { class: 'tk-row' }, btn('Start new session', {
+        variant: 'is-grow',
+        fid: 'new-session',
+        disabled: exporting,
+        onclick: onNewSession,
+      })));
+    }
 
     if (ui.confirm === 'discard') {
       out.push(h(
@@ -950,7 +1154,7 @@ function mount(controller) {
         h('p', {
           class: 'tk-p is-strong',
           id: 'tk-discard-q',
-          text: `Delete this session from this device?${res ? '' : ' You haven’t downloaded it yet.'} This can’t be undone.`,
+          text: `Delete this session from this device?${downloaded ? '' : visualOnly ? ' Its audio hasn’t been downloaded.' : ' You haven’t downloaded it yet.'} This can’t be undone.`,
         }),
         h(
           'div',
@@ -960,7 +1164,7 @@ function mount(controller) {
         ),
       ));
     } else {
-      out.push(h('div', { class: 'tk-row is-end' }, btn(res ? 'Finish and clear' : 'Discard', {
+      out.push(h('div', { class: 'tk-row is-end' }, btn(downloaded ? 'Finish and clear' : 'Discard', {
         variant: 'is-danger-quiet',
         fid: 'discard',
         disabled: exporting,
@@ -1123,6 +1327,20 @@ function mount(controller) {
   const onKeyGuarded = guard(onKey);
   const KEY_EVENTS = ['keydown', 'keyup', 'keypress'];
 
+  // Host focus traps (MUI's FocusTrap listens for document `focusin` and
+  // pulls focus back into its dialog or menu whenever document.activeElement,
+  // which is our shadow host, is outside it). Focus moving within the overlay
+  // is none of the host's business, so focusin/focusout whose target is inside
+  // the overlay stop at window capture, like keys. Focus itself is unaffected
+  // (these events aren't cancelable), and events of the host's own elements
+  // are untouched. Same limitation: window capture listeners registered before
+  // TestKit loaded still see them.
+  function onFocusEvent(e) {
+    if (e.composedPath().includes(host)) e.stopImmediatePropagation();
+  }
+  const onFocusGuarded = guard(onFocusEvent);
+  const FOCUS_EVENTS = ['focusin', 'focusout'];
+
   const onResize = guard(() => applyPosition());
 
   bubble.addEventListener('pointerdown', guard(onPointerDown));
@@ -1131,6 +1349,7 @@ function mount(controller) {
   bubble.addEventListener('pointercancel', guard((e) => endDrag(e, true)));
   bubble.addEventListener('click', guard(onBubbleClick));
   for (const type of KEY_EVENTS) window.addEventListener(type, onKeyGuarded, true);
+  for (const type of FOCUS_EVENTS) window.addEventListener(type, onFocusGuarded, true);
   window.addEventListener('resize', onResize);
 
   let unsubscribe = null;
@@ -1154,6 +1373,7 @@ function mount(controller) {
       clearTimeout(announceTimer);
       window.removeEventListener('resize', onResize);
       for (const type of KEY_EVENTS) window.removeEventListener(type, onKeyGuarded, true);
+      for (const type of FOCUS_EVENTS) window.removeEventListener(type, onFocusGuarded, true);
       try {
         if (typeof unsubscribe === 'function') unsubscribe();
       } catch {

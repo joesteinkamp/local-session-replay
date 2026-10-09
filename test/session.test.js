@@ -9,7 +9,7 @@ const RRWEB_STUB = 'export function record() { return () => {}; } record.addCust
 register(
   `data:text/javascript,${encodeURIComponent(`
     export async function resolve(specifier, context, next) {
-      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,export default ""', shortCircuit: true };
+      if (specifier === 'virtual:player-bundle') return { url: 'data:text/javascript,globalThis.__playerLoads = (globalThis.__playerLoads || 0); export const loadPlayerJs = async () => { globalThis.__playerLoads++; return ""; }', shortCircuit: true };
       if (specifier === 'rrweb') return { url: 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(RRWEB_STUB)}), shortCircuit: true };
       return next(specifier, context);
     }`)}`,

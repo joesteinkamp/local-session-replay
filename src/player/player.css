@@ -315,16 +315,6 @@ a:hover { color: var(--tk-text); }
   border-radius: 2px;
 }
 
-.tk-error {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  width: 3px;
-  margin-left: -1px;
-  background: var(--tk-danger);
-  border-radius: 2px;
-}
-
 .tk-playhead {
   position: absolute;
   top: 0;
@@ -368,7 +358,6 @@ a:hover { color: var(--tk-text); }
 .tk-swatch--task { background: var(--tk-task-0); }
 .tk-swatch--pause { background: repeating-linear-gradient(135deg, #9aa1ad 0 2px, #fff 2px 4px); }
 .tk-swatch--gap { background: #d97706; border-color: #d97706; }
-.tk-swatch--error { background: var(--tk-danger); border-color: var(--tk-danger); width: 4px; }
 
 .tk-hint {
   margin: var(--tk-space-2) 0 0;
@@ -493,7 +482,6 @@ kbd {
   color: var(--tk-warn);
 }
 
-.tk-badge--danger { background: #fde2e2; color: var(--tk-danger); }
 
 /* ---- Summary ---- */
 
