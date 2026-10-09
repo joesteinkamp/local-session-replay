@@ -226,6 +226,54 @@ function createAudioSync(segments, { onStatus }) {
   };
 }
 
+// ---------- volume control ----------
+
+// Lucide volume-2 / volume-x, inline so the export stays offline.
+const SPEAKER = 'M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z';
+const speakerIcon = (extra) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${SPEAKER}"/>${extra}</svg>`;
+const ICON_ON = speakerIcon('<path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>');
+const ICON_OFF = speakerIcon('<path d="M22 9l-6 6"/><path d="M16 9l6 6"/>');
+
+// The player's only volume control: a speaker button beside fullscreen that
+// slides a slider out on hover or keyboard focus. Clicking the speaker mutes.
+function createVolumeControl(audioSync) {
+  let muted = false;
+  let level = 100; // restored on unmute; the slider shows 0 while muted
+  const button = h('button', { type: 'button', class: 'tk-volume-btn', 'aria-label': 'Mute', 'aria-pressed': 'false' });
+  const slider = h('input', {
+    type: 'range', class: 'tk-volume-slider', min: '0', max: '100', value: '100', 'aria-label': 'Volume',
+  });
+  const render = () => {
+    button.innerHTML = muted || slider.value === '0' ? ICON_OFF : ICON_ON;
+    button.setAttribute('aria-pressed', String(muted));
+    button.title = muted ? 'Unmute' : 'Mute';
+    slider.style.setProperty('--tk-level', `${slider.value}%`);
+  };
+  const setMuted = (m) => {
+    muted = m;
+    if (m) {
+      slider.value = '0';
+    } else {
+      if (slider.value === '0') slider.value = String(level || 100);
+      audioSync.setVolume(Number(slider.value) / 100);
+    }
+    audioSync.setMuted(m);
+    render();
+  };
+  button.addEventListener('click', () => setMuted(!muted));
+  slider.addEventListener('input', () => {
+    if (slider.value !== '0') level = Number(slider.value);
+    // Dragging the slider up is an unmute, as in any media player.
+    if (muted && slider.value !== '0') setMuted(false);
+    else {
+      audioSync.setVolume(Number(slider.value) / 100);
+      render();
+    }
+  });
+  render();
+  return h('div', { class: 'tk-volume', role: 'group', 'aria-label': 'Audio volume' }, button, slider);
+}
+
 // ---------- timeline ----------
 
 function createTimeline({ t0, t1, spans, pauses, gaps, onSeek, onToggle }) {
@@ -610,10 +658,6 @@ function mount() {
   }
 
   // ---- timeline card ----
-  const volume = h('input', {
-    type: 'range', class: 'tk-volume', min: '0', max: '100', value: '100', 'aria-label': 'Audio volume',
-  });
-  const muteBtn = h('button', { type: 'button', class: 'tk-btn tk-btn--small', 'aria-pressed': 'false' }, 'Mute');
   const enableBtn = h('button', { type: 'button', class: 'tk-btn tk-btn--small', hidden: true }, 'Enable audio');
   const skipBox = h('input', { type: 'checkbox', checked: true });
   timelineCard.append(
@@ -632,7 +676,7 @@ function mount() {
     h('div', { class: 'tk-audio' },
       h('span', { class: 'tk-audio-label' }, 'Audio'),
       audioStatus,
-      audio.length ? [enableBtn, muteBtn, volume] : null,
+      audio.length ? enableBtn : null,
       pauses.length ? h('label', { class: 'tk-check' }, skipBox, 'Skip paused time') : null));
 
   if (audio.length) {
@@ -642,13 +686,6 @@ function mount() {
         audioStatus.classList.toggle('is-warn', warn);
         enableBtn.hidden = !audioSync?.blocked;
       },
-    });
-    volume.addEventListener('input', () => audioSync.setVolume(Number(volume.value) / 100));
-    muteBtn.addEventListener('click', () => {
-      const muted = muteBtn.getAttribute('aria-pressed') !== 'true';
-      muteBtn.setAttribute('aria-pressed', String(muted));
-      muteBtn.textContent = muted ? 'Unmute' : 'Mute';
-      audioSync.setMuted(muted);
     });
     enableBtn.addEventListener('click', () => {
       audioSync.unblock(wallNow());
@@ -669,7 +706,9 @@ function mount() {
   replayer.iframe?.setAttribute('title', 'Session replay');
   const controlButtons = stage.querySelectorAll('.rr-controller__btns button');
   const playButton = controlButtons[0];
-  controlButtons[controlButtons.length - 1]?.setAttribute('aria-label', 'Toggle fullscreen');
+  const fullscreenButton = controlButtons[controlButtons.length - 1];
+  fullscreenButton?.setAttribute('aria-label', 'Toggle fullscreen');
+  if (audioSync && fullscreenButton) fullscreenButton.before(createVolumeControl(audioSync));
   playButton?.setAttribute('aria-label', 'Play');
   stage.querySelector('.rr-controller input[type="checkbox"]')?.setAttribute('aria-label', 'Skip inactive periods');
   const isSkipping = () => replayer?.speedService?.state?.value === 'skipping';
