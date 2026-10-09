@@ -3,9 +3,11 @@
 export interface TestKitTask {
   id: string;
   prompt: string;
+  /** Shown in the summary as "Expected". */
   successHint?: string;
-  /** Seconds. A gentle nudge; never auto-advances. */
+  /** Seconds. A countdown on the task card; never auto-advances. */
   timeLimit?: number;
+  /** Accepted but not asked: the overlay keeps to the happy path. */
   followUp?: string;
 }
 

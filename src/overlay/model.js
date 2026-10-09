@@ -1,11 +1,8 @@
-// Pure helpers for the overlay: formatting, bubble geometry, and view gating.
+// Pure helpers for the overlay: formatting, bubble geometry, and card copy.
 // Kept DOM-free so they can be unit-tested under node:test.
-import { GAPS_MEANING } from '../export/summary.js';
 
 export const EDGE_MARGIN = 12;
 export const DRAG_THRESHOLD = 4;
-export const MIC_PASS_LEVEL = 0.15;
-export const MIC_PASS_MS = 300;
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -82,19 +79,6 @@ export function hasMovedPastThreshold(dx, dy, threshold = DRAG_THRESHOLD) {
   return dx * dx + dy * dy > threshold * threshold;
 }
 
-// Start needs consent, plus either a passed mic check or an explicit audio skip.
-export function canStart({ consent, audioEnabled, micPassed, audioSkipped }) {
-  if (!consent) return false;
-  if (!audioEnabled) return true;
-  return Boolean(micPassed || audioSkipped);
-}
-
-export function consentText(withAudio) {
-  return withAudio
-    ? 'This session records your screen activity and microphone audio on this device only. Nothing is uploaded. You’ll download a file at the end.'
-    : 'This session records your screen activity on this device only. Nothing is uploaded. You’ll download a file at the end.';
-}
-
 // Prefer the controller's count. Otherwise taskIndex is the task in progress at
 // stop, unless the overlay saw the tester finish the last task on this page.
 export function tasksCompleted(state, { finishedLast = false } = {}) {
@@ -104,30 +88,53 @@ export function tasksCompleted(state, { finishedLast = false } = {}) {
   return clamp(state.taskIndex ?? 0, 0, total);
 }
 
-// Local wall-clock time, e.g. "14:12" (or "2:12 PM", per the browser's locale).
-export function formatClock(ts) {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+export const FREE_PROMPT = 'Explore the prototype and think aloud as you go.';
+
+// Setup card. Pressing its button is the consent, so the copy says exactly
+// what gets recorded; "Screen only" is offered only when voice is possible.
+export function setupCopy({ study, tasks, audioEnabled }) {
+  const n = tasks?.length || 0;
+  const name = study || 'this study';
+  const what = n ? `${n} task${n === 1 ? '' : 's'} for ${name}.` : `Explore ${name} and think aloud as you go.`;
+  return {
+    heading: audioEnabled ? 'Record your screen and voice?' : 'Record your screen?',
+    text: `${what} Everything stays on this device; you’ll download one file at the end.`,
+    screenOnly: Boolean(audioEnabled),
+  };
 }
 
-// Setup line after "Start new session" from a downloaded session. JS only knows
-// the file was handed to the browser, so the tester gets a chance to check.
-export function previousDownloadText(ts) {
-  if (!Number.isFinite(ts)) return null;
-  return `The previous session’s file was downloaded at ${formatClock(ts)}. If it isn’t in your downloads folder, choose Cancel to download it again.`;
+// Bar step, "2/3"; null in free exploration.
+export function stepLabel(state) {
+  const total = state.tasks?.length || 0;
+  if (!total || !(state.taskIndex >= 0)) return null;
+  return `${Math.min(state.taskIndex + 1, total)}/${total}`;
 }
 
-// Skip task is offered only for a scripted task: free exploration has
-// nothing to skip (its Finish is Stop).
-export function canSkipTask(state) {
-  return Boolean(state?.tasks?.length && state.tasks[state.taskIndex]);
+// Prompt card eyebrow (shown uppercase): "Task 1 of 3 · 1:42 left".
+export function taskEyebrow(taskIndex, total, remainingMs) {
+  if (!total) return 'Free exploration';
+  const base = `Task ${taskIndex + 1} of ${total}`;
+  if (remainingMs == null) return base;
+  return remainingMs > 0 ? `${base} · ${formatCountdown(remainingMs)} left` : `${base} · Time’s up`;
+}
+
+// Finish card line: "3 of 3 tasks · 14:32 · audio recorded".
+export function finishLine(state, opts) {
+  const total = state.tasks?.length || 0;
+  const parts = [];
+  if (total) parts.push(`${tasksCompleted(state, opts)} of ${total} task${total === 1 ? '' : 's'}`);
+  parts.push(formatElapsed(state.elapsedMs));
+  const label = state.savedAudio?.label;
+  if (label) parts.push(label.charAt(0).toLowerCase() + label.slice(1));
+  return parts.join(' · ');
 }
 
 export const ADVANCE_TIMEOUT_MS = 10_000;
 
 /**
- * One Next/Skip call at a time. A press while one is in flight is dropped;
- * if a call never settles, the guard lets go after `timeoutMs` so the buttons
- * don't stay dead until reload (the controller's taskIndex check still stops
+ * One Next call at a time. A press while one is in flight is dropped;
+ * if a call never settles, the guard lets go after `timeoutMs` so the button
+ * doesn't stay dead until reload (the controller's taskIndex check still stops
  * a double advance). `run(fn)` → false when dropped, else fn's result.
  */
 export function createAdvanceGuard({ timeoutMs = ADVANCE_TIMEOUT_MS } = {}) {
@@ -158,87 +165,14 @@ export function createAdvanceGuard({ timeoutMs = ADVANCE_TIMEOUT_MS } = {}) {
   };
 }
 
-// Tasks the tester skipped (controller count; older controllers report none).
-export function tasksSkipped(state) {
-  const total = state.tasks?.length || 0;
-  return Number.isFinite(state.tasksSkipped) ? clamp(state.tasksSkipped, 0, total) : 0;
-}
-
-// Stopped panel tally: "2 of 3 completed, 1 skipped".
-export function taskTally(state, opts) {
-  const total = state.tasks?.length || 0;
-  const skipped = tasksSkipped(state);
-  return `${tasksCompleted(state, opts)} of ${total} completed${skipped ? `, ${skipped} skipped` : ''}`;
-}
-
-// Accumulates time spent above the pass level; the mic check passes once the
-// tester has been audible for a moment rather than on a single spike.
-export function createMicCheck(level = MIC_PASS_LEVEL, needMs = MIC_PASS_MS) {
-  let heard = 0;
-  let last = null;
-  return {
-    sample(value, now) {
-      const dt = last == null ? 0 : Math.min(now - last, 100);
-      last = now;
-      if (value > level) heard += dt;
-      return heard >= needMs;
-    },
-    reset() {
-      heard = 0;
-      last = null;
-    },
-  };
-}
-
-// User-facing audio status (audio-recording-plan.md §3). 'paused' comes from
-// the session phase, which owns the badge while paused.
-export const MIC_LABELS = {
-  live: 'Microphone on',
-  muted: 'Muted',
-  paused: 'Paused',
-  pending: 'Microphone starting',
-  reconnecting: 'Reconnecting…',
-  denied: 'Microphone blocked',
-  error: 'Audio stopped',
-  off: 'Microphone off',
-};
-
-export function micKind(audio, phase) {
-  if (!audio || !audio.enabled) return 'off';
-  const status = MIC_LABELS[audio.status] ? audio.status : 'off';
-  if (phase === 'paused' && (status === 'live' || status === 'muted' || status === 'pending')) return 'paused';
-  return status;
-}
-
+// Spoken through the live region (the bar shows no mic state), so a
+// think-aloud tester using a screen reader still hears the mic die.
 export const AUDIO_COPY = {
   stopped: 'Audio stopped — screen is still recording.',
   blocked: 'Microphone blocked — screen is still recording.',
-  blockedHelp: 'Open your browser’s site settings for this page (the icon at the left of the address bar), set Microphone to Allow, then choose Try again.',
   reconnecting: 'Reconnecting microphone…',
-  off: 'Microphone off — screen is still recording.',
-  deviceChanged: 'Your microphone devices changed. If your voice isn’t being picked up, retry the microphone.',
-  paused: 'Session paused — prototype interaction and voice are not saved.',
-  pausedMic: 'Your browser may still show the microphone as in use until you stop the session.',
 };
 
-/**
- * Which recovery notice the recording view shows, if any:
- * 'stopped' (recoverable: Retry) | 'blocked' (site settings) |
- * 'reconnecting' | 'off' (tester chose to continue without the mic) | null.
- */
-export function audioNotice(audio) {
-  if (!audio?.enabled) return null;
-  switch (audio.status) {
-    case 'error': return 'stopped';
-    case 'denied': return 'blocked';
-    case 'reconnecting': return 'reconnecting';
-    case 'off': return audio.stopAsking ? 'off' : null;
-    default: return null;
-  }
-}
-
-// What a status change should say through the live region (heard even with
-// the panel collapsed, so a think-aloud tester notices the mic dying).
 export function audioAnnouncement(prev, next) {
   const from = prev?.status;
   const to = next?.status;
@@ -250,14 +184,4 @@ export function audioAnnouncement(prev, next) {
     case 'live': return from === 'reconnecting' || from === 'error' || from === 'denied' ? 'Microphone on again.' : null;
     default: return null;
   }
-}
-
-// Pre-download line: exactly one of the three verdicts (controller.savedAudio).
-export function savedAudioText(saved) {
-  if (!saved?.label) return null;
-  if (saved.kind === 'gaps') {
-    const secs = Math.max(1, Math.round((saved.gapMs || 0) / 1000));
-    return `${saved.label} (${saved.gaps} gap${saved.gaps === 1 ? '' : 's'}, about ${secs} s). ${GAPS_MEANING}`;
-  }
-  return saved.label;
 }

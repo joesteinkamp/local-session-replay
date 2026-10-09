@@ -3,6 +3,10 @@
 import rrwebPlayer from 'rrweb-player';
 import RRWEB_CSS from 'rrweb-player/dist/style.css';
 import PLAYER_CSS from './player.css';
+// Variable-weight Latin subsets as base64 (build.mjs), so the design's type
+// renders offline: the export's CSP only allows data: fonts.
+import INTER_TIGHT from '@fontsource-variable/inter-tight/files/inter-tight-latin-wght-normal.woff2';
+import GEIST_MONO from '@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2';
 import {
   GAPS_MEANING, audioReport, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
   skippedSuffix, taskCounts,
@@ -24,7 +28,8 @@ const MIN_SKIPPABLE_PAUSE_MS = 1500;
 const CONTROLLER_HEIGHT = 80; // rrweb-player's fixed controller bar
 const RRWEB_META = 4;
 const RRWEB_FULL_SNAPSHOT = 2;
-const BAND_COLORS = 5;
+const BAND_COLORS = 3;
+const THEME_KEY = 'testkit:replay-theme';
 
 const reducedMotion = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -48,7 +53,8 @@ function h(tag, attrs = {}, ...children) {
 
 function injectStyles() {
   const style = document.createElement('style');
-  style.textContent = `${RRWEB_CSS}\n${PLAYER_CSS}`;
+  const face = (family, b64) => `@font-face{font-family:'${family}';src:url(data:font/woff2;base64,${b64}) format('woff2');font-weight:100 900;font-style:normal;font-display:swap}`;
+  style.textContent = `${face('Inter Tight', INTER_TIGHT)}\n${face('Geist Mono', GEIST_MONO)}\n${RRWEB_CSS}\n${PLAYER_CSS}`;
   document.head.append(style);
 }
 
@@ -226,6 +232,124 @@ function createAudioSync(segments, { onStatus }) {
   };
 }
 
+// ---------- icons ----------
+
+// Lucide icons, inline so the export stays offline.
+const svgIcon = (size, inner) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`;
+const lucide = (size, d) => svgIcon(size, `<path d="${d}"/>`);
+
+// ---------- theme ----------
+
+const THEME_ICONS = {
+  light: svgIcon(14, '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-17.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>'),
+  dark: svgIcon(14, '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>'),
+  system: svgIcon(14, '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8m-4-4v4"/>'),
+};
+
+// Light / Dark / System. The choice is remembered per browser (file:// pages
+// share one storage area, so it carries across exports); System follows the
+// viewer's OS setting live.
+function createThemeSwitch() {
+  const media = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
+  let choice = 'system';
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved in THEME_ICONS) choice = saved;
+  } catch {
+    // Storage can be off (privacy settings); the switch still works per visit.
+  }
+  const apply = () => {
+    document.documentElement.dataset.theme = choice === 'system' ? (media?.matches ? 'dark' : 'light') : choice;
+  };
+  media?.addEventListener?.('change', () => choice === 'system' && apply());
+  const buttons = Object.keys(THEME_ICONS).map((key) => {
+    const b = h('button', { type: 'button', role: 'radio', 'data-theme': key }, `${key[0].toUpperCase()}${key.slice(1)}`);
+    b.insertAdjacentHTML('afterbegin', THEME_ICONS[key]);
+    return b;
+  });
+  const render = () => buttons.forEach((b) => {
+    const on = b.dataset.theme === choice;
+    b.setAttribute('aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  const pick = (key) => {
+    choice = key;
+    try {
+      localStorage.setItem(THEME_KEY, key);
+    } catch {
+      // See above.
+    }
+    apply();
+    render();
+  };
+  const el = h('div', { class: 'tk-theme', role: 'radiogroup', 'aria-label': 'Theme' }, buttons);
+  el.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (b) pick(b.dataset.theme);
+  });
+  // Radio-group keys: arrows move and select.
+  el.addEventListener('keydown', (ev) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[ev.key];
+    if (!step) return;
+    ev.preventDefault();
+    const i = buttons.findIndex((b) => b.dataset.theme === choice);
+    const next = buttons[(i + step + buttons.length) % buttons.length];
+    pick(next.dataset.theme);
+    next.focus();
+  });
+  apply();
+  render();
+  return el;
+}
+
+// ---------- volume control ----------
+
+// Lucide volume-2 / volume-x.
+const SPEAKER = 'M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z';
+const speakerIcon = (extra) => svgIcon(18, `<path d="${SPEAKER}"/>${extra}`);
+const ICON_ON = speakerIcon('<path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>');
+const ICON_OFF = speakerIcon('<path d="M22 9l-6 6"/><path d="M16 9l6 6"/>');
+
+// The player's only volume control: a speaker button after fullscreen that
+// slides a slider out on hover or keyboard focus. Clicking the speaker mutes.
+function createVolumeControl(audioSync) {
+  let muted = false;
+  let level = 100; // restored on unmute; the slider shows 0 while muted
+  const button = h('button', { type: 'button', class: 'tk-volume-btn', 'aria-label': 'Mute', 'aria-pressed': 'false' });
+  const slider = h('input', {
+    type: 'range', class: 'tk-volume-slider', min: '0', max: '100', value: '100', 'aria-label': 'Volume',
+  });
+  const render = () => {
+    button.innerHTML = muted || slider.value === '0' ? ICON_OFF : ICON_ON;
+    button.setAttribute('aria-pressed', String(muted));
+    button.title = muted ? 'Unmute' : 'Mute';
+    slider.style.setProperty('--tk-level', `${slider.value}%`);
+  };
+  const setMuted = (m) => {
+    muted = m;
+    if (m) {
+      slider.value = '0';
+    } else {
+      if (slider.value === '0') slider.value = String(level || 100);
+      audioSync.setVolume(Number(slider.value) / 100);
+    }
+    audioSync.setMuted(m);
+    render();
+  };
+  button.addEventListener('click', () => setMuted(!muted));
+  slider.addEventListener('input', () => {
+    if (slider.value !== '0') level = Number(slider.value);
+    // Dragging the slider up is an unmute, as in any media player.
+    if (muted && slider.value !== '0') setMuted(false);
+    else {
+      audioSync.setVolume(Number(slider.value) / 100);
+      render();
+    }
+  });
+  render();
+  return h('div', { class: 'tk-volume', role: 'group', 'aria-label': 'Audio volume' }, button, slider);
+}
+
 // ---------- timeline ----------
 
 function createTimeline({ t0, t1, spans, pauses, gaps, onSeek, onToggle }) {
@@ -319,6 +443,103 @@ function createTimeline({ t0, t1, spans, pauses, gaps, onSeek, onToggle }) {
   };
 }
 
+// ---------- speed menu ----------
+
+const SPEEDS = [0.5, 1, 1.25, 1.5, 2, 4, 8];
+const ICON_CHEVRON = lucide(14, 'm6 9 6 6 6-6');
+const ICON_CHECK = lucide(16, 'M20 6 9 17l-5-5');
+
+// rrweb-player's row of speed buttons, collapsed into one "1× ⌄" button that
+// opens a menu upward over the replay (as in Slack's player). Menu-button
+// keyboard pattern: arrows move, Enter/Space pick, Escape closes.
+function createSpeedMenu({ speeds, initial, hasAudio, onChange }) {
+  let current = initial;
+  const value = h('span', { class: 'tk-speed-value' });
+  const button = h('button', {
+    type: 'button', class: 'tk-speed-btn', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'tk-speed-menu',
+  }, h('span', { class: 'tk-sr' }, 'Playback speed '), value);
+  button.insertAdjacentHTML('beforeend', ICON_CHEVRON);
+  const items = speeds.map((s) => {
+    const item = h('div', { class: 'tk-speed-item', role: 'menuitemradio', tabindex: '-1', 'data-speed': s },
+      h('span', { class: 'tk-speed-check' }), `${s}×`,
+      hasAudio && s > MAX_AUDIBLE_RATE ? h('span', { class: 'tk-speed-note' }, 'No audio') : null);
+    item.firstChild.innerHTML = ICON_CHECK;
+    return item;
+  });
+  const menu = h('div', { class: 'tk-speed-menu', id: 'tk-speed-menu', role: 'menu', 'aria-label': 'Playback speed' }, ...items);
+  const popover = h('div', { class: 'tk-speed-popover', hidden: true },
+    h('div', { class: 'tk-speed-head', 'aria-hidden': 'true' }, 'Playback speed'), menu);
+  const el = h('div', { class: 'tk-speed' }, button, popover);
+
+  const render = () => {
+    value.textContent = `${current}×`;
+    items.forEach((it) => it.setAttribute('aria-checked', String(Number(it.dataset.speed) === current)));
+  };
+  const isOpen = () => !popover.hidden;
+  const close = (refocus) => {
+    if (!isOpen()) return;
+    popover.hidden = true;
+    button.setAttribute('aria-expanded', 'false');
+    if (refocus) button.focus();
+  };
+  // The focus ring only shows when the keyboard is driving the menu.
+  const open = (focusIndex, byKeyboard) => {
+    popover.classList.toggle('is-keyboard', Boolean(byKeyboard));
+    popover.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    const checked = items.findIndex((it) => it.getAttribute('aria-checked') === 'true');
+    items[focusIndex ?? Math.max(0, checked)].focus();
+  };
+  const pick = (s) => {
+    close(true);
+    if (s === current) return;
+    current = s;
+    render();
+    onChange(s);
+  };
+
+  // Keep focus where it is on press, so Safari (which never focuses buttons on
+  // click) doesn't blur the open menu and immediately reopen it.
+  button.addEventListener('mousedown', (ev) => ev.preventDefault());
+  // detail is 0 for clicks synthesized by Enter/Space.
+  button.addEventListener('click', (ev) => (isOpen() ? close(true) : open(undefined, ev.detail === 0)));
+  button.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault();
+    open(ev.key === 'ArrowUp' ? items.length - 1 : undefined, true);
+  });
+  menu.addEventListener('click', (ev) => {
+    const item = ev.target.closest('.tk-speed-item');
+    if (item) pick(Number(item.dataset.speed));
+  });
+  menu.addEventListener('keydown', (ev) => {
+    popover.classList.add('is-keyboard');
+    const i = items.indexOf(document.activeElement);
+    const move = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[ev.key];
+    if (move !== undefined) items[(move + items.length) % items.length].focus();
+    else if (ev.key === 'Enter' || ev.key === ' ') pick(Number(items[i].dataset.speed));
+    else if (ev.key === 'Escape') close(true);
+    else if (ev.key === 'Tab') close(false);
+    else return;
+    if (ev.key !== 'Tab') ev.preventDefault();
+  });
+  // Clicking anywhere else, the replay iframe included, takes focus away.
+  el.addEventListener('focusout', (ev) => {
+    if (!el.contains(ev.relatedTarget)) close(false);
+  });
+
+  render();
+  return {
+    el,
+    // Follow speed changes made elsewhere (TestKitPlayer.player.setSpeed).
+    set(s) {
+      if (s === current || !speeds.includes(s)) return;
+      current = s;
+      render();
+    },
+  };
+}
+
 // ---------- actions ----------
 
 function download(filename, text, type) {
@@ -390,6 +611,7 @@ function renderFatal(root, message) {
 
 function mount() {
   injectStyles();
+  const themeSwitch = createThemeSwitch();
   const root = document.getElementById('testkit-app') || document.body.appendChild(h('div', { id: 'testkit-app' }));
   let data;
   try {
@@ -475,9 +697,7 @@ function mount() {
         metaItem('Commit', meta.commitSha ? h('code', {}, meta.commitSha) : 'unknown'),
         metaItem('Prototype', protoLink)),
       assetNotice),
-    h('div', { class: 'tk-actions' },
-      h('button', { type: 'button', class: 'tk-btn tk-btn--primary', onclick: copySummary }, 'Copy agent summary'),
-      h('button', { type: 'button', class: 'tk-btn', onclick: downloadJson }, 'Download raw JSON')));
+    themeSwitch);
 
   // ---- stage + timeline ----
   const stage = h('div', { class: 'tk-stage' });
@@ -515,8 +735,9 @@ function mount() {
   }
 
   const taskButtons = [];
+  const stageCol = h('div', { class: 'tk-stage-col' }, stage, replayable ? timelineCard : null);
   const pageMain = h('div', { class: 'tk-main' },
-    h('div', {}, stage, replayable ? timelineCard : null),
+    stageCol,
     h('aside', { class: 'tk-side' },
       h('section', { class: 'tk-tasks-card tk-card', 'aria-labelledby': 'tk-tasks-title' },
         h('h2', { class: 'tk-section-title', id: 'tk-tasks-title' }, 'Tasks'),
@@ -546,7 +767,7 @@ function mount() {
     h('span', { class: 'tk-task-head' }, h('span', {}, `Task ${span.n}`), h('span', {}, formatDuration(active))),
     h('span', { class: 'tk-task-prompt' }, span.prompt),
     badges.length ? h('span', { class: 'tk-badges' }, badges) : null);
-    btn.style.setProperty('--tk-band', `var(--tk-task-${i % BAND_COLORS})`);
+    btn.style.setProperty('--tk-band', `var(--lab-task-${(i % BAND_COLORS) + 1})`);
     taskButtons.push(btn);
     taskList.append(h('li', {}, btn));
   });
@@ -558,14 +779,19 @@ function mount() {
   if (!taskList.children.length) taskList.append(h('li', { class: 'tk-hint' }, 'No tasks were recorded in this session.'));
 
   // ---- summary ----
-  const summaryDetails = h('details', { class: 'tk-summary tk-card' },
+  const summaryDetails = h('details', {},
     h('summary', {}, 'Agent summary (Markdown)'),
     h('div', { class: 'tk-summary-body' },
       h('div', { class: 'tk-summary-actions' },
-        h('button', { type: 'button', class: 'tk-btn tk-btn--small', onclick: copySummary }, 'Copy')),
+        h('button', { type: 'button', class: 'tk-btn tk-btn--small', onclick: copySummary }, 'Copy agent summary')),
       h('pre', { class: 'tk-pre', tabindex: '0', 'aria-label': 'Agent summary markdown' }, summary)));
+  // The download sits over the summary row but outside <summary>, so clicking
+  // it doesn't toggle the details (and a button inside summary isn't valid).
+  stageCol.append(h('section', { class: 'tk-summary tk-card', 'aria-label': 'Agent summary' },
+    summaryDetails,
+    h('button', { type: 'button', class: 'tk-btn tk-summary-download', onclick: downloadJson }, 'Download raw JSON')));
 
-  root.replaceChildren(h('main', { class: 'tk-page' }, header, pageMain, summaryDetails), toast.el);
+  root.replaceChildren(h('main', { class: 'tk-page' }, header, pageMain), toast.el);
 
   if (!replayable) {
     stage.append(h('div', { class: 'tk-card tk-empty' },
@@ -593,14 +819,10 @@ function mount() {
         skipInactive: audio.length === 0,
         showWarning: false,
         mouseTail: !reducedMotion,
-        speedOption: [1, 2, 4, 8],
-        tags: {
-          'testkit:task-start': '#2563eb',
-          'testkit:task-end': '#4b5260',
-          'testkit:pause': '#6b7280',
-          'testkit:resume': '#6b7280',
-          'testkit:session-end': '#16181d',
-        },
+        // rrweb-player rejects a speed outside speedOption; its buttons are
+        // hidden below in favor of the speed menu.
+        speedOption: SPEEDS,
+        speed: 1,
       },
     });
   } catch (err) {
@@ -610,10 +832,6 @@ function mount() {
   }
 
   // ---- timeline card ----
-  const volume = h('input', {
-    type: 'range', class: 'tk-volume', min: '0', max: '100', value: '100', 'aria-label': 'Audio volume',
-  });
-  const muteBtn = h('button', { type: 'button', class: 'tk-btn tk-btn--small', 'aria-pressed': 'false' }, 'Mute');
   const enableBtn = h('button', { type: 'button', class: 'tk-btn tk-btn--small', hidden: true }, 'Enable audio');
   const skipBox = h('input', { type: 'checkbox', checked: true });
   timelineCard.append(
@@ -621,19 +839,20 @@ function mount() {
       h('h2', { class: 'tk-section-title', id: 'tk-timeline-title' }, 'Timeline'),
       clock),
     timeline.el,
-    h('p', { class: 'tk-hint', id: 'tk-timeline-hint' },
+    h('p', { class: 'tk-sr', id: 'tk-timeline-hint' },
       'Click or drag to seek. ', h('kbd', {}, '←'), ' ', h('kbd', {}, '→'), ' 5 s, ',
       h('kbd', {}, 'Shift'), ' or ', h('kbd', {}, 'Page Up/Down'), ' 30 s, ', h('kbd', {}, 'Home'), ' / ', h('kbd', {}, 'End'),
       ', ', h('kbd', {}, 'Space'), ' play/pause.'),
-    h('ul', { class: 'tk-legend', 'aria-label': 'Legend' },
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--task' }), 'Task'),
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--pause' }), `Paused (${pauses.length})`),
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--gap' }), `Audio gap (${gaps.length})`)),
-    h('div', { class: 'tk-audio' },
-      h('span', { class: 'tk-audio-label' }, 'Audio'),
-      audioStatus,
-      audio.length ? [enableBtn, muteBtn, volume] : null,
-      pauses.length ? h('label', { class: 'tk-check' }, skipBox, 'Skip paused time') : null));
+    h('div', { class: 'tk-timeline-foot' },
+      h('ul', { class: 'tk-legend', 'aria-label': 'Legend' },
+        h('li', {}, h('span', { class: 'tk-swatch tk-swatch--task' }), 'Task'),
+        h('li', {}, h('span', { class: 'tk-swatch tk-swatch--pause' }), `Paused (${pauses.length})`),
+        h('li', {}, h('span', { class: 'tk-swatch tk-swatch--gap' }), `Audio gap (${gaps.length})`)),
+      h('div', { class: 'tk-audio' },
+        h('span', { class: 'tk-sr' }, 'Audio: '),
+        audioStatus,
+        audio.length ? enableBtn : null,
+        pauses.length ? h('label', { class: 'tk-check' }, skipBox, 'Skip paused time') : null)));
 
   if (audio.length) {
     audioSync = createAudioSync(audio, {
@@ -642,13 +861,6 @@ function mount() {
         audioStatus.classList.toggle('is-warn', warn);
         enableBtn.hidden = !audioSync?.blocked;
       },
-    });
-    volume.addEventListener('input', () => audioSync.setVolume(Number(volume.value) / 100));
-    muteBtn.addEventListener('click', () => {
-      const muted = muteBtn.getAttribute('aria-pressed') !== 'true';
-      muteBtn.setAttribute('aria-pressed', String(muted));
-      muteBtn.textContent = muted ? 'Unmute' : 'Mute';
-      audioSync.setMuted(muted);
     });
     enableBtn.addEventListener('click', () => {
       audioSync.unblock(wallNow());
@@ -669,11 +881,19 @@ function mount() {
   replayer.iframe?.setAttribute('title', 'Session replay');
   const controlButtons = stage.querySelectorAll('.rr-controller__btns button');
   const playButton = controlButtons[0];
-  controlButtons[controlButtons.length - 1]?.setAttribute('aria-label', 'Toggle fullscreen');
+  const fullscreenButton = controlButtons[controlButtons.length - 1];
+  fullscreenButton?.setAttribute('aria-label', 'Toggle fullscreen');
+  if (audioSync && fullscreenButton) fullscreenButton.after(createVolumeControl(audioSync));
   playButton?.setAttribute('aria-label', 'Play');
   stage.querySelector('.rr-controller input[type="checkbox"]')?.setAttribute('aria-label', 'Skip inactive periods');
   const isSkipping = () => replayer?.speedService?.state?.value === 'skipping';
   const speedNow = () => Number(replayer?.config?.speed) || 1;
+  // The buttons between play and fullscreen are rrweb-player's speed buttons.
+  [...controlButtons].slice(1, -1).forEach((b) => { b.hidden = true; });
+  const speedMenu = createSpeedMenu({
+    speeds: SPEEDS, initial: 1, hasAudio: audio.length > 0, onChange: (s) => player.setSpeed(s),
+  });
+  playButton?.after(speedMenu.el);
 
   const sync = () => {
     const wall = wallNow();
@@ -685,7 +905,7 @@ function mount() {
     const taskText = idx >= 0 ? `, ${spans[idx].label}` : '';
     const elapsed = formatDuration(offset);
     const totalText = formatDuration(t1 - t0);
-    clock.replaceChildren(h('strong', {}, elapsed), ` / ${totalText}${idx >= 0 ? ` · Task ${spans[idx].n}` : ''}`);
+    clock.replaceChildren(h('strong', {}, elapsed), ` / ${totalText}`);
     timeline.update(offset, `${elapsed} of ${totalText}${taskText}`, idx);
 
     if (playing && skipPauses) {
@@ -695,6 +915,7 @@ function mount() {
         return;
       }
     }
+    if (!isSkipping()) speedMenu.set(speedNow());
     audioSync?.update({ wall, playing, speed: speedNow(), skipping: isSkipping() });
   };
 

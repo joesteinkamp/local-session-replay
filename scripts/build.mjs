@@ -25,7 +25,7 @@ const common = {
   minify: !watch,
   sourcemap: false,
   legalComments: 'none',
-  loader: { '.css': 'text' },
+  loader: { '.css': 'text', '.woff2': 'base64' },
   define: { __TESTKIT_VERSION__: JSON.stringify(version) },
   logLevel: 'info',
 };
