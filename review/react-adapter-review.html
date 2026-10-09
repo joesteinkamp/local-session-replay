@@ -1,0 +1,136 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>React adapter plan review</title><style>*{box-sizing:border-box}body{margin:0;background:#f4f5f7;color:#192637;font:17px/1.65 system-ui,-apple-system,sans-serif}header,main,nav,footer{max-width:1040px;margin:auto;padding:32px}header{padding-top:56px}h1{font-size:clamp(36px,5vw,54px);line-height:1.12;letter-spacing:-.04em;margin:16px 0 24px}h2{font-size:28px;line-height:1.25;letter-spacing:-.02em}h3{font-size:23px;line-height:1.3;margin:8px 0}p{margin:14px 0}.eyebrow,.tag{font-size:12px;letter-spacing:.1em;font-weight:750;color:#6d501a}.high{color:#a02823}.lede{font-size:21px;color:#405269}.stats{display:flex;gap:28px;flex-wrap:wrap;margin-top:24px}.stats b{font-size:25px}nav{display:flex;flex-wrap:wrap;gap:8px 24px;border-block:1px solid #c9d1dc;padding-block:16px}a{color:#174f9f;text-underline-offset:3px}a:focus-visible,summary:focus-visible{outline:3px solid #174f9f;outline-offset:4px}nav a{padding:8px 0}section{margin-bottom:48px}article{background:white;border:1px solid #d3dbe5;border-radius:12px;padding:28px;margin:20px 0}.refs{font-size:13px;color:#526477}li{margin:12px 0}code{font-size:.85em;background:#e7edf4;padding:2px 4px;overflow-wrap:anywhere}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;background:white;font-size:15px}th,td{padding:14px;text-align:left;vertical-align:top;border:1px solid #d3dbe5}th{width:35%;font-weight:650}summary{padding:16px;background:#e6edf5;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.7 ui-monospace,monospace;background:white;padding:20px}footer{border-top:1px solid #c9d1dc;color:#526477;font-size:13px}@media(max-width:650px){header,main,nav,footer{padding:22px}article{padding:20px}}@media print{body{background:white;font-size:11pt}article{break-inside:avoid}nav{display:none}h1{font-size:30pt}}</style></head><body><header><p class="eyebrow">PLAN REVIEW · 7 OCTOBER 2026 · CODEX</p><h1>A good direction.<br>Make the package contract explicit.</h1><p class="lede">Proceed after tightening React bundling, lifecycle semantics and consumer acceptance tests. Keep the single package, lazy recorder, root component and secondary HTML loader.</p><div class="stats"><span><b>1</b> high-priority gap</span><span><b>6</b> medium-priority gaps</span><span><b>0</b> implementation changes</span></div></header><nav aria-label="Report sections"><a href="#findings">Findings</a><a href="#additions">Plan additions</a><a href="#tests">Acceptance matrix</a><a href="#limits">Evidence & limits</a><a href="#snapshot">Pinned plan</a></nav><main><section id="findings"><h2>What to fix in the plan</h2><p>These are proposal omissions and ambiguities, not claims that an implemented adapter already fails. Resolve P1 before implementation and P2 before handoff.</p><article><p class="tag high">P1 · 1</p><h3>Explicitly externalize React in the package build</h3><p class="refs">Plan 25, 80–81 · scripts/build.mjs:16–25, 63–71</p><p>The plan says “do not bundle React,” but peers alone do not achieve that. The current esbuild configuration uses bundle:true with no externals. Adding useEffect can embed a different React instance from the host renderer, causing hook failures.<p><b>Add:</b> external: ['react', 'react-dom'] to the package ESM build; package externals cover subpaths too. Keep rrweb/player bundled into the lazy core. Do not externalize every dependency indiscriminately: rrweb and rrweb-player currently exist only as build-time dev dependencies.</p><p><b>Prove:</b> inspect the output/build graph for external React imports and no embedded React runtime; render the installed package with the host’s React 18 and 19.</p><p><a href="https://esbuild.github.io/api/#external">esbuild external configuration</a> · <a href="https://react.dev/warnings/invalid-hook-call-warning">React duplicate-runtime explanation</a></p></p></article><article><p class="tag ">P2 · 2</p><h3>Define page lifetime and unmount behavior</h3><p class="refs">Plan 23, 70–73, 97 · src/core/index.js:8–19; src/core/session.js:583–644</p><p>The core discards the overlay destroy handle and exposes no controller disposal method. A thin component wrapper therefore leaves recording and overlay alive after unmount; a pending boot may finish after the component disappears.<p><b>Recommendation:</b> explicitly preserve a page-lifetime bootstrap in v1. Unmount does not disable it; keep it at the stable app root, use the overlay to stop capture, and reload to change configuration. If unmount must stop capture, expand scope to ownership, async cancellation and full resource disposal.</p><p>Do not add overlay-only cleanup mechanically. StrictMode repeats effect setup/cleanup, while the global claim suppresses a second boot; cleanup could remove the first overlay permanently. Missing cleanup is not inherently a bug under a documented page-lifetime contract. <a href="https://react.dev/reference/react/useEffect">React effect lifecycle</a>.</p></p></article><article><p class="tag ">P2 · 3</p><h3>First props means first attempt across the whole page</h3><p class="refs">Plan 23, 34, 72, 97 · src/index.js:9–12; src/activation.js:13–16, 32–46</p><p>The global claim occurs before activation and is shared with script installs. Mounting inactive consumes it. Later active mounts, changed keys, asynchronous task data, another study, and client-side query changes do not re-evaluate initialization.<p><b>Add:</b> “The first committed mount attempt on the page owns initial configuration, even when inactive. Wait to mount until study/tasks are ready; later props and remounts do not reconfigure it. Reload to change configuration.” Preserve the locked behavior unless deliberately reopening that decision.</p><p>Require useful diagnostics for conflicting later instances, without warning on every new object identity: the sample’s inline tasks array changes identity on parent renders. Document existing precedence: initial ?test=0 wins; otherwise a fresh session precedes activate=false. An activation predicate is not an authorization boundary.</p></p></article><article><p class="tag ">P2 · 4</p><h3>Catch asynchronous boot failures at the component boundary</h3><p class="refs">Plan 70, 79, 130 · src/index.js:12; src/core/index.js:10–15, 23</p><p>The dynamic import can reject before the core catch exists. Calling boot from an effect without handling its promise can emit an unhandled rejection when a chunk fails to load. Consumers no longer receive an init() promise to await. Both initialization guards also remain set after failures.<p><b>Add:</b> a synchronous effect callback that launches boot with explicit rejection handling, consistent diagnostics for chunk/storage failures, and a recovery policy. “Fix the cause and reload” is sufficient for v1. Do not clear guards and retry partially initialized resources without cleanup.</p><p>Test rejected imports and storage boot failure. Permanent failure flags are inherited behavior; containing a fire-and-forget launch is an adapter integration responsibility.</p></p></article><article><p class="tag ">P2 · 5</p><h3>Separate SSR safety from Server Component support</h3><p class="refs">Plan 70–73, 80 · scripts/build.mjs:63–71; README.md:16–39</p><p>A window guard protects runtime boot; it does not create a client boundary for a hook-using module imported from a Server Component. The current README names Next as a supported host. A Vite-only example cannot establish that path.<p><b>Add:</b> preserve 'use client' in the shipped component entry and test the built package in an RSC consumer, or explicitly require and demonstrate a host client wrapper. A source directive alone is not enough if bundling strips it. Separately test ordinary SSR and hydration without server-side browser-global access.</p><p>Function-valued activate must be defined inside client code; ordinary callbacks cannot cross the server/client boundary. This finding does not claim ordinary SSR is broken. <a href="https://nextjs.org/docs/app/getting-started/server-and-client-components#third-party-components">Next library-author guidance</a> · <a href="https://react.dev/reference/rsc/use-client">React serialization rules</a>.</p></p></article><article><p class="tag ">P2 · 6</p><h3>Validate the delivered package, not only a linked example</h3><p class="refs">Plan 80, 91–99, 123–126 · package.json:7–27; test/index.test.js:7–27</p><p>Current entry tests import source directly. A linked example can inherit repository dependencies or resolve a second React. Neither proves packaged exports, copied types, emitted chunks, or a clean install.<p><b>Add:</b> install a built tarball into an isolated consumer; import only the package name; run a production build and complete session/export. Also test the documented Git install from a pinned commit, since prepare is a separate delivery path. Exercise both React majors and compile a TSX consumer against shipped declarations.</p><p>Qualify line 80: the host app bundler does not repeat the CSS/player build, but a Git install runs TestKit’s own prepare build. Document supported Node/package-manager versions and lifecycle-script requirements. <a href="https://docs.npmjs.com/cli/v11/using-npm/scripts/#life-cycle-scripts">npm lifecycle documentation</a>.</p></p></article><article><p class="tag ">P2 · 7</p><h3>Plan the breaking migration and keep the script init example</h3><p class="refs">Plan 18, 77–87, 119 · src/loader.js:13–27; src/index.js:10; package.json:3</p><p>Removing the advertised named init export from a 1.0.0 package is intentionally breaking. Specify release/version policy and a before/after migration, including what happens to non-React bundled consumers. This does not require reopening the locked React-only API decision.<p>“init is not … in README” directly conflicts with keeping script installs: those still need window.TestKit.init(). Scope the removal to the named npm export and primary React examples. Extracting today’s body also preserves a browser-global init; “internal” cannot mean inaccessible everywhere.</p><p>If bumping the major, address Pages coupling: the build derives /v&lt;major&gt;/ from the package version and deployment replaces the site. Preserve existing script URLs or explicitly decouple script and npm versioning.</p></p></article></section><section id="additions"><h2>Small additions that make this implementable</h2><ol><li><b>Lifetime:</b> first committed attempt wins across the page, even if inactive. Unmount and new props do not stop or reconfigure capture. Reload resets configuration.</li><li><b>Boot:</b> one in-flight launch, complete async error containment, useful diagnostics, documented reload recovery.</li><li><b>Build:</b> external React, lazy bundled core, correct shipped client boundary and types, no special host build plugins.</li><li><b>Compatibility:</b> npm migration/version decision, script-global exception, documented SSR/RSC placement.</li><li><b>Proof:</b> real React rendering and clean packaged-consumer tests alongside the current suite and HTML demo.</li></ol><p><b>Suggested sequence:</b> settle lifetime/release contracts → establish package external/client-boundary checks → extract boot and add wrapper → prove production consumer behavior → finish examples/docs. Build acceptance checks alongside implementation instead of leaving all tests to step 6.</p><h2>Optional improvements</h2><ul><li>Keep Shadow DOM and the export unchanged. No controller hook, portal rewrite, dual packages or generic disposal framework is necessary for page lifetime.</li><li>Justify react-dom as a peer: the wrapper only imports React. It can communicate a supported renderer constraint, or live in the example/test harness. This is dependency policy, not a blocker.</li><li>Expose TestKitProps from the current config; a declaration returning null avoids unnecessary global JSX namespace coupling. Check both supported type ecosystems.</li><li>Measure inactive production loading cost. Dynamic import defers the core; it does not promise zero wrapper bytes or prevent every host from preloading. Recheck the README’s existing ~1 KB claim.</li><li>Explain the sample’s -D assumption: dev dependencies must be available during the app build; production output must include the runtime code it needs.</li><li>Update CONTRACTS.md beyond ownership: scope “no framework” to the core and describe host-served lazy chunks in the network-loading exception.</li></ul></section><section id="tests"><h2>Replace “boots once” with observable acceptance</h2><div class="table-wrap"><table><caption>Implementation acceptance matrix</caption><tbody><tr><th scope="row">React 18 and 19 with real StrictMode rendering</th><td>One boot and overlay; no duplicate capture or invalid hook call after effect replay.</td></tr><tr><th scope="row">Duplicate mounts, changed props, inactive-first mount</th><td>Documented first-attempt behavior; no study/config switch; useful diagnostic.</td></tr><tr><th scope="row">Unmount during pending boot; remount during recording</th><td>Intentional page-lifetime behavior; no duplicate overlay or recorder.</td></tr><tr><th scope="row">Rejected chunk and storage failure</th><td>No unhandled rejection; useful diagnostic and explicit recovery.</td></tr><tr><th scope="row">Inactive production page; initial ?test=0 with fresh pointer</th><td>No core request or capture initialization; verify network and build graph.</td></tr><tr><th scope="row">Fresh/stale same-study and wrong-study pointers</th><td>Existing activation/resume rules remain intact through the wrapper.</td></tr><tr><th scope="row">Built package SSR, hydration and RSC if promised</th><td>No browser globals on the server; usable client boundary and serialized props.</td></tr><tr><th scope="row">Clean tarball consumer plus pinned Git install</th><td>Public exports, types and chunks exist; production build works without private source imports or special host plugins.</td></tr><tr><th scope="row">Production session plus HTML regression</th><td>Start, SPA navigation, stop, download and open standalone replay; script init and mixed-install singleton still work.</td></tr></tbody></table></div><p>Use a focused React DOM harness and browser checks where behavior requires them. Keep node:test for the core; no whole-suite migration is needed.</p></section><section id="limits"><h2>Evidence, disagreement and limits</h2><p>Reviewed Cursor’s 135-line plan against code commit <code>cb559e49a2573ef45eb7f8d3120aaf99a419e163</code>. Source and pinned-copy hashes matched at the last comparison. Plan SHA-256: <code>ca73187d77f2fe8535a305075560f1319e24512b2877cd420fa133873bf1f953</code>.</p><p><b>Three lenses:</b> lead packaging/architecture review, native frontend lifecycle reviewer and native refuter. The frontend reviewer rated lifetime and error handling P1. The refuter disputed lifetime severity because the locked singleton choices are coherent. This report treats both as P2: define and test their contract, without imposing a teardown redesign.</p><p><b>Validation:</b> source and official React, Next.js, esbuild and npm documentation reviewed. The refuter reports the existing activation/package-entry tests passed 8/8. No React adapter implementation, production consumer build, RSC test or full suite was executed in this review. The matrix above is proposed acceptance, not completed testing.</p><p>Automatic approval review rejected the separate Claude subprocess because it would transmit repository contents to another model service without specific authorization. No cross-vendor review ran; native refutation completed instead. The model-routing file is dated 2026-07-24 and was not used as current benchmark evidence.</p><p>Cursor’s plan and all source files remain untouched. Review files live on <code>ai/codex-review</code>; temporary coordination notes are at <code>~/.ai-context/local-session-replay-react-review/</code>. No changelog was written. The memory registry <code>~/.ai/memory-os</code> points to an absent <code>~/.ai-memory</code>; prior project context was read from <code>~/.ai-context/local-session-replay-testkit-v1/STATE.md</code>.</p></section><section id="snapshot"><h2>Pinned plan</h2><p>Original: ../local-session-replay-cursor/react-adapter-plan.md. Line references refer to this unchanged copy.</p><details><summary>Show the full reviewed plan</summary><pre># Plan: Agentation-style React install
+
+**Status:** Agreed (grill-me, 2026-10-07)
+**Branch / worktree:** `ai/cursor` → `../local-session-replay-cursor`
+**Supersedes (narrative):** `testkit-plan.md` Phase 6 framing TestKit as its own Pages project, and the &quot;Later → Optional React adapter&quot; bullet as a thin afterthought.
+
+## Problem
+
+The original plan treated TestKit as a **separate hosted script** (own GitLab/GitHub Pages project) that prototypes load with `&lt;script src=&quot;…/testkit.js&quot;&gt;`. The desired model is **Agentation / DialKit-style**: install the package into the app under test, mount a React component, and let the host bundler own the code.
+
+The repo already supports `npm i` from GitHub and `import { init } from &#x27;local-session-replay&#x27;` with a dynamic import of the recorder. What&#x27;s missing is the **React component as the public API** and making **in-app install the primary story**.
+
+## Decisions (locked)
+
+| Topic | Choice |
+| :-- | :-- |
+| Public API | `&lt;TestKit /&gt;` only — no controller/state hook in v1 |
+| `init()` | Becomes **internal**; not part of the public export / docs |
+| Install model | npm into the host app (like Agentation), not a remote toolkit host |
+| Package shape | **Single package**; React component is the public API |
+| Core loading | Keep today&#x27;s **dynamic `import()`** of core so the host splits a chunk; casual viewers who never mount/activate don&#x27;t pay for rrweb |
+| Script-tag / Pages | **Secondary** for plain HTML multi-page demos; keep working, demote in docs |
+| Config lifecycle | **Mount-once**; first props win; ignore later prop updates |
+| Example | README + **`examples/react/`** Vite app; keep HTML `demo/` for script-tag |
+| React | `peerDependencies`: `react` and `react-dom` `^18.0.0 \|\| ^19.0.0` (do not bundle React) |
+
+### Rejected alternatives
+
+- Controller `useTestKit()` hook — not needed until apps drive session UI/flow themselves.
+- Remote loader / required `src` URL — wrong distribution model for React apps.
+- Bundling core into the main chunk with no split — taxes every visitor; dynamic import already matches Agentation install while preserving cost.
+- Dual packages (`@testkit/core` + `@testkit/react`) — extra moving parts for one consumer shape.
+- Removing script-tag / Pages entirely — still useful for no-bundler HTML prototypes.
+- Re-init on prop changes — unsafe mid-session; mount-once matches today&#x27;s `claimInit`.
+- Replacing HTML `demo/` with React only — keep both paths proven.
+
+## Goal
+
+A React app can:
+
+```sh
+npm i -D github:joesteinkamp/local-session-replay
+```
+
+```jsx
+import { TestKit } from &#x27;local-session-replay&#x27;;
+
+export default function App() {
+  return (
+    &lt;&gt;
+      &lt;YourPrototype /&gt;
+      &lt;TestKit
+        study=&quot;grid-filters-v2&quot;
+        tasks={[
+          { id: &#x27;filter&#x27;, prompt: &#x27;Filter to healthcare companies&#x27; },
+        ]}
+      /&gt;
+    &lt;/&gt;
+  );
+}
+```
+
+Open with `?test=1` (or a custom `activate` prop), run the session, download the same self-contained HTML export. No separate TestKit Pages project required for this path.
+
+## Scope
+
+### 1. `&lt;TestKit /&gt;` component
+
+- Props = current `TestKitConfig` (`study`, `tasks`, `activate`, `audio`, `mask`, and the rest of the config reference).
+- Client-only: `useEffect` calls internal boot once; component renders `null` (overlay remains Shadow DOM).
+- Respect existing activation (`?test=1`, `?test=0`, fresh in-progress session, `activate` function/boolean).
+- Stable placement at the app root; ignore prop updates after mount (optional `console.warn` in development).
+- SSR-safe: no-op when `typeof window === &#x27;undefined&#x27;` (same guard as today&#x27;s package entry).
+
+### 2. Package surface
+
+- Public export: `{ TestKit, version }` (plus TypeScript types).
+- `init` is not exported from the package entry, `.d.ts`, or README.
+- Internal boot module holds today&#x27;s `init()` logic for the component and, if needed, the script-tag path&#x27;s shared activation/boot helpers.
+- Build emits the compiled component into `dist/` via existing `prepare` / `scripts/build.mjs` (host does **not** re-run TestKit&#x27;s CSS/player bundling steps).
+- Add `react` / `react-dom` peerDependencies as above.
+
+### 3. Docs and plan correction
+
+- **README:** Agentation-style `npm i` + `&lt;TestKit /&gt;` first; script-tag + Pages under &quot;also supported.&quot;
+- **`testkit-plan.md`:** Phase 6 / Later — distribution is **in-app npm**; React component is the primary integration, not an optional afterthought. Pages is a secondary distribution for HTML-only hosts.
+- **`docs/CONTRACTS.md`:** layout/ownership for the React entry; public export contract; note `init` is internal.
+
+### 4. `examples/react/`
+
+- Minimal Vite + React app depending on the local package (workspace / `file:` / relative install).
+- Mount `&lt;TestKit study tasks … /&gt;` beside a tiny prototype UI.
+- Documented run path (e.g. `npm run example:react` or `cd examples/react &amp;&amp; npm i &amp;&amp; npm run dev`).
+
+### 5. Tests
+
+- Component wrapper: boots once; second mount no-ops; safe without `window`.
+- Prefer the smallest harness that fits the repo (`node:test` if viable; otherwise a focused runner only where needed).
+- Existing core/unit tests and HTML `demo/` / script-tag path remain green.
+
+## Out of scope
+
+- Controller / session-state React hook
+- Removing GitHub Pages or the script-tag loader
+- Publishing to the npm registry (stay on GitHub install unless decided later)
+- In-session flagging, Whisper transcription, React-specific annotate APIs
+
+## Implementation sketch
+
+```
+src/react/TestKit.jsx    # public component
+src/boot.js              # today&#x27;s init() body; not exported
+src/index.js             # export { TestKit, version }
+src/index.d.ts           # TestKit props + version
+examples/react/          # Vite + React proof app
+scripts/build.mjs        # emit React entry into dist/
+```
+
+Script-tag loader (`src/loader.js` → `public/v1/testkit.js`) keeps using internal `start` / `__TestKitCore` unchanged.
+
+## Done when
+
+1. A React app installs the package and uses **only** `&lt;TestKit … /&gt;` (no public `init`).
+2. `examples/react/` can run a full session with `?test=1`.
+3. README, `testkit-plan.md`, and `docs/CONTRACTS.md` describe in-app install as primary.
+4. Existing unit tests pass; HTML script-tag demo still works.
+
+## Implementation order
+
+1. Extract internal boot from the current public `init()`.
+2. Add `&lt;TestKit /&gt;` + types; switch package exports.
+3. Wire `scripts/build.mjs` / peers / `files` as needed.
+4. Add `examples/react/` and README primary path.
+5. Update contracts + `testkit-plan.md` distribution narrative.
+6. Tests for mount-once / SSR no-op; regression on existing suite.
+</pre></details></section></main><footer>Review only · no source or original-plan edits · 2026-10-07, Codex</footer></body></html>
