@@ -7,6 +7,13 @@
 - **Why this approach:** hide them, don't stop capturing them. The raw data stays complete for developers, while every view a researcher sees is about behavior.
 - **Rejected:** a setting to show or hide errors. Nobody asked for it, and it would add configuration for a view this tool shouldn't have.
 
+## React adapter, audio recovery, and real-app hardening (2026-10-08, Claude)
+
+- **What:** `<TestKit />` on a `local-session-replay/react` subpath (`init()` stays for non-React apps); microphone recovery (Retry, blocked/stopped notices, Continue without microphone) with status that only reads "Microphone on" while audio is being saved, and one saved-audio verdict shared by overlay, summary and player; Skip task; Start new session after Stop; `?test=1` captured at first import so router redirects can't drop it; replay player split out of the core (559 → 285 kB) and prefetched at start so export works offline; same-millisecond log order fixed; host focus traps no longer steal overlay focus; a Chrome browser harness and a browser × scenario matrix.
+- **Ask:** run `react-adapter-plan.md` and `audio-recording-plan.md`, then prove it with real recordings in channel-checks and a plain non-React app.
+- **Why this approach:** a subpath keeps the root entry free of React with no major version bump. Separating "chose voice" from "stop asking" stops a denial erasing evidence of saved audio. One retry path closes the pause race. The real-app runs surfaced the skip, redirect, new-session, ordering and chunk-size gaps that unit tests missed.
+- **Rejected:** a React-only root (a breaking change); an npm workspace for the example (it added ~30 MB to every GitHub install); trimming audio at a missing middle chunk (Chrome plays through it); keeping several stopped sessions side by side (orphaned sessions would fill the quota); an in-page retry after a failed player import in bundled apps (Chrome caches the failure for the life of the page).
+
 ## Installable package for other web apps, hosted on GitHub (2026-10-07, Claude)
 
 - **What:** renamed to `local-session-replay`. Added an ES module entry point (`init()`) that loads the recorder only when needed, plus types. It installs from GitHub and builds on install. Added a `baseUrl` option for the script tag, replaced GitLab CI with GitHub Actions + Pages, and licensed it MIT.
