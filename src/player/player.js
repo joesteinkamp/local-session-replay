@@ -310,7 +310,7 @@ const speakerIcon = (extra) => svgIcon(18, `<path d="${SPEAKER}"/>${extra}`);
 const ICON_ON = speakerIcon('<path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>');
 const ICON_OFF = speakerIcon('<path d="M22 9l-6 6"/><path d="M16 9l6 6"/>');
 
-// The player's only volume control: a speaker button after fullscreen that
+// The player's only volume control: a speaker button next to play that
 // slides a slider out on hover or keyboard focus. Clicking the speaker mutes.
 function createVolumeControl(audioSync) {
   let muted = false;
@@ -686,18 +686,18 @@ function mount() {
   const header = h('header', { class: 'tk-header' },
     h('div', { class: 'tk-header-main' },
       h('p', { class: 'tk-eyebrow' }, 'TestKit session replay'),
-      h('h1', { class: 'tk-title' }, session.study || 'Untitled study'),
-      h('dl', { class: 'tk-meta' },
-        metaItem('Started', formatLocal(sessionStart)),
-        metaItem('Duration', durationText),
-        metaItem('Tasks', `${counts.done} of ${counts.total} completed${skippedSuffix(counts)}`),
-        metaItem('Audio', h('span', { title: saved.kind === 'gaps' ? GAPS_MEANING : null }, savedText)),
-        metaItem('Browser', describeBrowser(meta.userAgent)),
-        metaItem('Viewport', meta.viewport ? `${meta.viewport.w} × ${meta.viewport.h}` : 'unknown'),
-        metaItem('Commit', meta.commitSha ? h('code', {}, meta.commitSha) : 'unknown'),
-        metaItem('Prototype', protoLink)),
-      assetNotice),
-    themeSwitch);
+      h('h1', { class: 'tk-title' }, session.study || 'Untitled study')),
+    themeSwitch,
+    h('dl', { class: 'tk-meta' },
+      metaItem('Started', formatLocal(sessionStart)),
+      metaItem('Duration', durationText),
+      metaItem('Tasks', `${counts.done} of ${counts.total} completed${skippedSuffix(counts)}`),
+      metaItem('Audio', h('span', { title: saved.kind === 'gaps' ? GAPS_MEANING : null }, savedText)),
+      metaItem('Browser', describeBrowser(meta.userAgent)),
+      metaItem('Viewport', meta.viewport ? `${meta.viewport.w} × ${meta.viewport.h}` : 'unknown'),
+      metaItem('Commit', meta.commitSha ? h('code', {}, meta.commitSha) : 'unknown'),
+      metaItem('Prototype', protoLink)),
+    assetNotice);
 
   // ---- stage + timeline ----
   const stage = h('div', { class: 'tk-stage' });
@@ -883,7 +883,6 @@ function mount() {
   const playButton = controlButtons[0];
   const fullscreenButton = controlButtons[controlButtons.length - 1];
   fullscreenButton?.setAttribute('aria-label', 'Toggle fullscreen');
-  if (audioSync && fullscreenButton) fullscreenButton.after(createVolumeControl(audioSync));
   playButton?.setAttribute('aria-label', 'Play');
   stage.querySelector('.rr-controller input[type="checkbox"]')?.setAttribute('aria-label', 'Skip inactive periods');
   const isSkipping = () => replayer?.speedService?.state?.value === 'skipping';
@@ -893,7 +892,10 @@ function mount() {
   const speedMenu = createSpeedMenu({
     speeds: SPEEDS, initial: 1, hasAudio: audio.length > 0, onChange: (s) => player.setSpeed(s),
   });
-  playButton?.after(speedMenu.el);
+  // Left: play, volume (when there's audio), speed, skip inactive.
+  // Right: fullscreen, pushed over by CSS.
+  const volume = audioSync ? createVolumeControl(audioSync) : null;
+  playButton?.after(...[volume, speedMenu.el].filter(Boolean));
 
   const sync = () => {
     const wall = wallNow();

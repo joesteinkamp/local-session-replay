@@ -120,13 +120,18 @@ body {
 
 /* ---- Header ---- */
 
+/* Title and theme switch share the top row; the meta card and notices span
+   the full page width beneath them. */
 .tk-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--tk-space-4);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px var(--tk-space-4);
   margin-bottom: var(--tk-space-5);
 }
+
+.tk-header > .tk-meta,
+.tk-header > .tk-notice { grid-column: 1 / -1; }
 
 .tk-header-main {
   display: flex;
@@ -171,7 +176,6 @@ body {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--tk-space-4) var(--tk-space-5);
-  align-self: stretch;
   margin: 0;
   padding: 20px var(--tk-space-5);
   background: var(--lab-surface);
@@ -362,7 +366,7 @@ a:hover { text-decoration: underline; }
 #testkit-app .rr-controller__btns > button svg { fill: var(--lab-text); }
 #testkit-app .rr-controller__btns > button:first-child svg { width: 20px; height: 20px; }
 #testkit-app .rr-controller__btns > button:active { background: var(--lab-subtle); }
-/* Fullscreen sits after the spacer; volume (when there's audio) follows it. */
+/* Fullscreen is the last button and sits alone on the right. */
 #testkit-app .rr-controller__btns > button:not([hidden]):last-of-type { margin-left: auto; }
 
 /* rrweb-player's "skip inactive" toggle, drawn as the design's checkbox. */

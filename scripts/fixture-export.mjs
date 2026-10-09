@@ -20,7 +20,7 @@ await esbuild.build({
   format: 'iife',
   minify: true,
   legalComments: 'none',
-  loader: { '.css': 'text' },
+  loader: { '.css': 'text', '.woff2': 'base64' },
   logLevel: 'warning',
 });
 const playerJs = await readFile(playerFile, 'utf8');
