@@ -803,9 +803,16 @@ function mount() {
   // ---- player ----
   const viewport = viewportOf(session, events);
   const size = () => {
+    // rrweb-player fullscreens its own .rr-player box; fill it rather than the
+    // stage, or the resize listeners below shrink the replay back mid-fullscreen.
+    // Fullscreen also lifts the 1x cap so a smaller recording scales up to fit.
+    const full = document.fullscreenElement || document.webkitFullscreenElement;
+    if (full && stage.contains(full)) {
+      return { width: full.clientWidth, height: Math.max(240, full.clientHeight - CONTROLLER_HEIGHT), maxScale: 0 };
+    }
     const width = Math.max(320, Math.floor(stage.clientWidth));
     const maxHeight = Math.max(240, Math.floor(window.innerHeight * 0.72) - CONTROLLER_HEIGHT);
-    return { width, height: Math.min(maxHeight, Math.round(width * (viewport.h / viewport.w))) };
+    return { width, height: Math.min(maxHeight, Math.round(width * (viewport.h / viewport.w))), maxScale: 1 };
   };
 
   try {
@@ -933,13 +940,18 @@ function mount() {
   });
   sync();
 
-  const ro = new ResizeObserver(() => {
+  const resize = () => {
     player.$set(size());
     // triggerResize reads the iframe size, which Svelte updates on the next tick.
     requestAnimationFrame(() => player.triggerResize());
-  });
-  ro.observe(stage);
-  window.addEventListener('resize', () => player.$set(size()));
+  };
+  new ResizeObserver(resize).observe(stage);
+  window.addEventListener('resize', resize);
+  // rrweb-player resizes on fullscreenchange in a setTimeout(0) of its own,
+  // using stale pre-fullscreen dimensions on exit; settle after it.
+  const onFullscreen = () => setTimeout(resize, 0);
+  document.addEventListener('fullscreenchange', onFullscreen);
+  document.addEventListener('webkitfullscreenchange', onFullscreen);
 
   transcribe(data); // v1.5 hook; resolves to null today.
   window.TestKitPlayer = { player, data, seekToWall: (ts) => seek(ts - t0), getOffset: () => offset };
