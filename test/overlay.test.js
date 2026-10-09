@@ -2,28 +2,23 @@ import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EDGE_MARGIN,
-  canSkipTask,
-  canStart,
+  FREE_PROMPT,
   createAdvanceGuard,
-  consentText,
-  createMicCheck,
   describeDuration,
+  finishLine,
   formatBytes,
   formatCountdown,
   formatElapsed,
   hasMovedPastThreshold,
   AUDIO_COPY,
   audioAnnouncement,
-  audioNotice,
-  micKind,
   parsePosition,
-  previousDownloadText,
-  savedAudioText,
+  setupCopy,
   snapPosition,
+  stepLabel,
+  taskEyebrow,
   taskRemainingMs,
-  taskTally,
   tasksCompleted,
-  tasksSkipped,
 } from '../src/overlay/model.js';
 
 test('formatElapsed uses mm:ss, then h:mm:ss past an hour', () => {
@@ -83,20 +78,6 @@ test('drag threshold distinguishes a click from a drag', () => {
   assert.equal(hasMovedPastThreshold(3, 3), true);
 });
 
-test('canStart requires consent and a passed or skipped mic check', () => {
-  assert.equal(canStart({ consent: false, audioEnabled: false }), false);
-  assert.equal(canStart({ consent: true, audioEnabled: false }), true);
-  assert.equal(canStart({ consent: true, audioEnabled: true, micPassed: false, audioSkipped: false }), false);
-  assert.equal(canStart({ consent: true, audioEnabled: true, micPassed: true }), true);
-  assert.equal(canStart({ consent: true, audioEnabled: true, audioSkipped: true }), true);
-  assert.equal(canStart({ consent: false, audioEnabled: true, micPassed: true }), false);
-});
-
-test('consentText mentions audio only when recording it', () => {
-  assert.match(consentText(true), /microphone audio/);
-  assert.doesNotMatch(consentText(false), /microphone/);
-});
-
 test('tasksCompleted prefers the controller count and clamps the fallback', () => {
   const tasks = [{}, {}, {}];
   assert.equal(tasksCompleted({ tasks, taskIndex: 1, tasksCompleted: 2 }), 2);
@@ -108,48 +89,44 @@ test('tasksCompleted prefers the controller count and clamps the fallback', () =
   assert.equal(tasksCompleted({ tasks, taskIndex: 2, tasksCompleted: 1 }, { finishedLast: true }), 1);
 });
 
-test('mic check passes only after sustained level, not a single spike', () => {
-  const check = createMicCheck(0.15, 300);
-  let t = 0;
-  assert.equal(check.sample(0.9, t), false);
-  // One loud frame then silence: not enough.
-  for (let i = 0; i < 20; i++) assert.equal(check.sample(0.01, (t += 16)), false);
-  let passed = false;
-  for (let i = 0; i < 25 && !passed; i++) passed = check.sample(0.3, (t += 16));
-  assert.equal(passed, true);
-  check.reset();
-  assert.equal(check.sample(0.3, 0), false);
+test('setupCopy: the button is the consent, so the copy says what is recorded', () => {
+  const voice = setupCopy({ study: 'grid-filters-v2', tasks: [{}, {}, {}], audioEnabled: true });
+  assert.equal(voice.heading, 'Record your screen and voice?');
+  assert.match(voice.text, /^3 tasks for grid-filters-v2\. Everything stays on this device/);
+  assert.equal(voice.screenOnly, true);
+  const screen = setupCopy({ study: 'grid-filters-v2', tasks: [{}], audioEnabled: false });
+  assert.equal(screen.heading, 'Record your screen?');
+  assert.match(screen.text, /^1 task for /);
+  assert.equal(screen.screenOnly, false, 'no Screen only link when voice is off anyway');
+  assert.match(setupCopy({ study: 'x', tasks: [], audioEnabled: true }).text, /^Explore x and think aloud/);
 });
 
-test('mic check ignores long frame gaps (backgrounded tab)', () => {
-  const check = createMicCheck(0.15, 300);
-  check.sample(0.3, 0);
-  assert.equal(check.sample(0.3, 5000), false);
+test('stepLabel: n/total for scripted tasks, nothing in free exploration', () => {
+  const tasks = [{}, {}, {}];
+  assert.equal(stepLabel({ tasks, taskIndex: 0 }), '1/3');
+  assert.equal(stepLabel({ tasks, taskIndex: 2 }), '3/3');
+  assert.equal(stepLabel({ tasks, taskIndex: 7 }), '3/3');
+  assert.equal(stepLabel({ tasks, taskIndex: -1 }), null);
+  assert.equal(stepLabel({ tasks: [], taskIndex: 0 }), null);
 });
 
-test('micKind maps controller audio state to an indicator', () => {
-  assert.equal(micKind({ enabled: false, status: 'live' }), 'off');
-  assert.equal(micKind({ enabled: true, status: 'live' }), 'live');
-  assert.equal(micKind({ enabled: true, status: 'denied' }), 'denied');
-  assert.equal(micKind({ enabled: true, status: 'bogus' }), 'off');
-  assert.equal(micKind(undefined), 'off');
-  assert.equal(micKind({ enabled: true, status: 'reconnecting' }), 'reconnecting');
-  assert.equal(micKind({ enabled: true, status: 'live' }, 'paused'), 'paused', 'session phase owns the badge');
-  assert.equal(micKind({ enabled: true, status: 'error' }, 'paused'), 'error', 'a failure still shows while paused');
+test('taskEyebrow: task position, countdown, then time is up', () => {
+  assert.equal(taskEyebrow(0, 3, null), 'Task 1 of 3');
+  assert.equal(taskEyebrow(0, 3, 102_000), 'Task 1 of 3 · 1:42 left');
+  assert.equal(taskEyebrow(1, 3, 0), 'Task 2 of 3 · Time’s up');
+  assert.equal(taskEyebrow(0, 0, null), 'Free exploration');
+  assert.match(FREE_PROMPT, /think aloud/);
 });
 
-test('audioNotice: recoverable vs blocked vs tester-chosen off', () => {
-  assert.equal(audioNotice({ enabled: true, status: 'error' }), 'stopped');
-  assert.equal(audioNotice({ enabled: true, status: 'denied' }), 'blocked');
-  assert.equal(audioNotice({ enabled: true, status: 'reconnecting' }), 'reconnecting');
-  assert.equal(audioNotice({ enabled: true, status: 'off', stopAsking: true }), 'off');
-  assert.equal(audioNotice({ enabled: true, status: 'off', stopAsking: false }), null);
-  assert.equal(audioNotice({ enabled: true, status: 'live' }), null);
-  assert.equal(audioNotice({ enabled: false, status: 'error' }), null, 'no voice chosen at Start: nothing to recover');
-  assert.equal(AUDIO_COPY.stopped, 'Audio stopped — screen is still recording.');
-  assert.equal(AUDIO_COPY.blocked, 'Microphone blocked — screen is still recording.');
-  assert.equal(AUDIO_COPY.paused, 'Session paused — prototype interaction and voice are not saved.');
-  assert.equal(AUDIO_COPY.pausedMic, 'Your browser may still show the microphone as in use until you stop the session.');
+test('finishLine: tasks, duration, and the saved-audio verdict', () => {
+  const tasks = [{}, {}, {}];
+  assert.equal(
+    finishLine({ tasks, tasksCompleted: 3, elapsedMs: 872_000, savedAudio: { label: 'Audio recorded' } }),
+    '3 of 3 tasks · 14:32 · audio recorded',
+  );
+  assert.equal(finishLine({ tasks: [], elapsedMs: 65_000, savedAudio: { label: 'No audio recorded' } }), '01:05 · no audio recorded');
+  assert.equal(finishLine({ tasks: [{}], tasksCompleted: 0, elapsedMs: 0, savedAudio: null }), '0 of 1 task · 00:00');
+  assert.equal(finishLine({ tasks, taskIndex: 2, elapsedMs: 0 }, { finishedLast: true }), '3 of 3 tasks · 00:00');
 });
 
 test('audioAnnouncement: mic death and recovery are spoken even when collapsed', () => {
@@ -158,36 +135,6 @@ test('audioAnnouncement: mic death and recovery are spoken even when collapsed',
   assert.equal(audioAnnouncement({ enabled: true, status: 'reconnecting' }, { enabled: true, status: 'live' }), 'Microphone on again.');
   assert.equal(audioAnnouncement({ enabled: true, status: 'pending' }, { enabled: true, status: 'live' }), null, 'normal start is quiet');
   assert.equal(audioAnnouncement({ enabled: true, status: 'live' }, { enabled: true, status: 'live' }), null);
-});
-
-test('savedAudioText: exactly one verdict; gaps explain what a gap means', () => {
-  assert.equal(savedAudioText({ kind: 'recorded', label: 'Audio recorded' }), 'Audio recorded');
-  assert.equal(savedAudioText({ kind: 'none', label: 'No audio recorded' }), 'No audio recorded');
-  assert.match(savedAudioText({ kind: 'gaps', label: 'Audio recorded with gaps', gaps: 2, gapMs: 4200 }),
-    /^Audio recorded with gaps \(2 gaps, about 4 s\)\. Gaps are stretches where the microphone was not capturing/);
-  assert.equal(savedAudioText(null), null);
-});
-
-test('taskTally: skipped tasks are counted apart from completed ones', () => {
-  const tasks = [{}, {}, {}];
-  assert.equal(taskTally({ tasks, tasksCompleted: 2, tasksSkipped: 1 }), '2 of 3 completed, 1 skipped');
-  assert.equal(taskTally({ tasks, tasksCompleted: 3, tasksSkipped: 0 }), '3 of 3 completed');
-  assert.equal(tasksSkipped({ tasks }), 0, 'older controllers report no skips');
-  assert.equal(tasksSkipped({ tasks, tasksSkipped: 9 }), 3);
-});
-
-test('previousDownloadText: says when the previous file was handed to the browser, only if it was', () => {
-  assert.equal(previousDownloadText(null), null);
-  const text = previousDownloadText(new Date(2026, 9, 8, 14, 12).getTime());
-  assert.match(text, /downloaded at .*12/);
-  assert.match(text, /Cancel to download it again/);
-});
-
-test('canSkipTask: only for a scripted task, never in free exploration', () => {
-  assert.equal(canSkipTask({ tasks: [], taskIndex: -1 }), false);
-  assert.equal(canSkipTask({ tasks: [], taskIndex: 0 }), false);
-  assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 0 }), true);
-  assert.equal(canSkipTask({ tasks: [{ id: 'a' }], taskIndex: 1 }), false);
 });
 
 test('advance guard: drops presses while a call is in flight, and lets go of a call that never settles', async () => {

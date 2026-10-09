@@ -85,7 +85,7 @@ React 18 and 19 are supported. `examples/react/` is a working Vite app.
 - **Unmounting doesn't stop a session.** Recording continues across route
   changes until the tester stops it in the overlay.
 - **Host dialogs and menus (MUI and similar focus traps):** while one is open,
-  the tester can click the TestKit bubble and use the panel with the keyboard;
+  the tester can click the TestKit bubble or bar and use it with the keyboard;
   the overlay keeps its focus events to itself so the trap doesn't pull focus
   back. Tab from inside the host dialog still can't reach the overlay (that's
   the dialog's job), and a trap that listens at `window` capture and was
@@ -165,24 +165,22 @@ mixed, the first one to run wins.
 | `inlineImages` | `true` | Embeds `<img>` content in the recording so replays survive redeploys. Turn off for image-heavy prototypes (large files) or prototypes with cross-origin images whose servers don't send CORS headers — rrweb retries those with `crossOrigin` set, which can break them on the live page. |
 | `baseUrl` | folder of `testkit.js` | Script-tag installs only: where to fetch `testkit-core.js` from. Absolute or root-relative. |
 | `commitSha` | `<meta name="testkit:commit">` | Recorded in the export metadata. In CI, template the commit SHA (e.g. `$GITHUB_SHA`) into the meta tag. |
-| `tasks[]` | `[]` | `{ id, prompt, successHint?, timeLimit?, followUp? }`. `timeLimit` is seconds (a gentle nudge, never auto-advances). `followUp` asks a question after the task. `successHint` is shown behind a disclosure and in the summary as "Expected". |
+| `tasks[]` | `[]` | `{ id, prompt, successHint?, timeLimit?, followUp? }`. `timeLimit` is seconds (a countdown on the task card, never auto-advances). `successHint` appears in the summary as "Expected". `followUp` is accepted but not asked: the overlay keeps to the happy path. |
 
 ## Running a session (facilitator checklist)
 
 1. Use desktop Chrome, Firefox, or Safari. Close unrelated tabs.
-2. Open the prototype with `?test=1`. Click the TestKit bubble → **Start test session**.
-3. Pre-flight: read the consent line aloud, tick consent, allow the mic, and
-   say something until the level check passes. (Or continue without audio.)
-4. Give the tester control. They read the task, think aloud, and click
-   **Next task** when done, or **Skip task** to give up on one (the export
-   shows it as Skipped, not Completed). Works moderated or unmoderated:
-   whoever has the keyboard advances.
-5. **Pause** for interruptions, **Mute** for side conversations.
-6. After the last task (or **Stop**), click **Download session file**. Then
-   **Discard** to clear the data from the browser, or **Start new session**
-   for the next participant: a downloaded session is cleared from the browser
-   when the next one starts; if it hasn't been downloaded, TestKit asks you to
-   download or discard it first.
+2. Open the prototype with `?test=1` and click the yellow TestKit bubble.
+3. Read the card aloud, then **Agree and start** (allow the mic when the
+   browser asks) or **Screen only**. Pressing it is the consent.
+4. Give the tester control. The bubble becomes a bar with the task above it.
+   They think aloud and click **Next** when done; the last task says
+   **Finish**. Clicking the step (**1/3**) hides or shows the task. The
+   **Stop** square ends the session early. Works moderated or unmoderated:
+   whoever has the mouse advances.
+5. On the finish card, click **Download session**, then **Discard** to clear
+   it from the browser before the next participant. Discarding a session that
+   wasn't downloaded takes a second click.
 
 Reloads, crashes, and page navigations resume the same session automatically.
 Expect a short silence in the audio at each page load, typically under a second (longer on slow pages). Gaps of 0.5 s or more are marked on the timeline and counted in the summary; shorter ones appear in the trail as not counted.

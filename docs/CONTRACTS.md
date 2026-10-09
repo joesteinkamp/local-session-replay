@@ -305,12 +305,9 @@ was downloaded** (`exportedAt` set: it would only fill storage, unreachable;
 a without-audio export does not count, since the file lacks the audio),
 and **left in IndexedDB otherwise** (never deleted without a download or an
 explicit `discard()`; `start()` still clears `testkit:last`, so it is reachable
-only through IndexedDB). The overlay therefore never starts over from an
-undownloaded session without asking: its "Start new session" goes straight to
-setup when `downloaded`, else confirms with **Download first** (exports, stays on
-the stopped panel) / **Discard and start new** (`discard()` then
-`beginPreflight()`) / **Cancel**. After a without-audio download the confirm says
-the audio wasn't downloaded and offers **Try with audio** instead of Download first. Rejected: keeping several stopped sessions
+only through IndexedDB). The happy-path overlay (2026-10-09) no longer
+offers Start new session from `stopped`: the tester downloads, then Discards
+(see Overlay), so this path is reachable only through the controller. Rejected: keeping several stopped sessions
 reachable (needs a session listing in store.js and a picker in the overlay), and
 "Start anyway (it stays saved)", which would promise data the overlay can't
 show again. The active pointer and stale logic are untouched: they only ever
@@ -321,10 +318,10 @@ regains a mirror.
 **"Downloaded" is best-effort.** `exportedAt` means `download()` handed the file
 to the browser (`<a download>` click). A blocked download, a cancelled Save
 dialog or a full disk is invisible to the page, so it still counts. Mitigation:
-setup started from a downloaded session gets `state.previousDownloadedAt`, and
-the overlay says "The previous session’s file was downloaded at HH:MM. If it
-isn’t in your downloads folder, choose Cancel to download it again." Cancel
-returns to that session; it is deleted only when the new session starts.
+setup started from a downloaded session gets `state.previousDownloadedAt`
+(the happy-path overlay doesn't show it, since it never starts setup from
+`stopped`). Cancel returns to that session; it is deleted only when the new
+session starts.
 (Rejected for now: holding the old session until the new one has recorded
 something meaningful, which needs a definition of "meaningful" and leaves two
 sessions in storage.)
@@ -528,25 +525,40 @@ id="testkit-root">` appended to `<html>` (not `<body>`, so prototype body
 re-renders can't remove it). Everything inside the shadow root is excluded from
 rrweb (`blockClass: 'testkit-block'`) and from the interaction log.
 
-The pause toggle is `data-fid="pause"` while it reads Pause and
-`data-fid="resume"` while it reads Resume; keyboard focus follows it across the
-switch.
+**Happy path only (decided 2026-10-09, ui.pen → 07 · C · Happy path).** The
+overlay has three views and nothing else:
 
-Task controls: **Skip task** (`data-fid="skip-task"`, a plain secondary button
-before the primary Next task/Finish, disabled while paused, hidden during a
-follow-up question and in free exploration) calls `skipTask()`. Next, Skip task and the follow-up buttons advance at most
-once per click: the second click of a double click (`event.detail > 1`) is
-ignored, a press while the previous call is in flight is ignored (the guard
-lets go after 10 s if a call never settles, so the buttons can't stay dead
-until reload), and the call
-carries `taskIndex` so the controller drops a stale one. The stopped panel
-shows "N of M completed, K skipped" and **Start new session**
-(`data-fid="new-session"`; confirm buttons `confirm-download`,
-`confirm-discard-new`, `confirm-cancel`) as described under Controller.
+- **Setup card** (idle/preflight, opened from the bubble): **Agree and start**
+  (`data-fid="start"`) or **Screen only** (`screen-only`, shown only when audio
+  is enabled). Pressing either is the consent: it calls `beginPreflight()` then
+  `start({ consent: true, audio })`, and `start()` asks for the mic itself.
+  There is no consent checkbox and no mic level check.
+- **Recording bar** (recording/paused) in place of the bubble: REC, the step
+  (`step`, "1/3", toggles the task card), **Next** / **Finish** (`next`,
+  `nextTask()`; free exploration: Finish = `stop()`), and a Stop square (`stop`,
+  `stop()`, no confirm). The dark task card beside it shows the prompt and the
+  `timeLimit` countdown; it reopens on every new task. A session restored as
+  paused shows **Resume** (`resume`) in place of Next. Mic status, elapsed time,
+  pause, mute, skip, follow-up questions and success hints are not shown; mic
+  changes are still announced through the live region.
+- **Finish card** (stopped/exporting): **Download session** (`download`; reads
+  Download again, Try again, or Reload and retry as the export state changes),
+  **Download without audio** (`download-visual`, only when
+  `exportWithoutAudio`), and **Discard** (`discard`, `discard()`; an undownloaded
+  session asks once more: "Discard without downloading?").
+
+Another tab's lock shows a card with no controls. Next advances at most once
+per click: the second click of a double click (`event.detail > 1`) is ignored, a
+press while the previous call is in flight is ignored (the guard lets go after
+10 s if a call never settles), and the call carries `taskIndex` so the
+controller drops a stale one. `pause()`, `resume()`, `toggleMute()`,
+`skipTask()`, `retryMic()`, `continueWithoutMic()`, `requestMic()` and
+`cancelPreflight()` stay in the controller (tests and the browser harness use
+them) but no overlay control calls them.
 
 Overlay-owned storage: `localStorage['testkit:overlay-pos']` = `{ side: 'left'|'right', y }`
 (bubble position, survives navigation); `sessionStorage['testkit:overlay-open']` =
-`'1'|'0'` (panel expanded, per tab). Key events inside the overlay stop at the shadow
+`'1'|'0'` (setup/finish card open, per tab; the recording bar is always shown). Key events inside the overlay stop at the shadow
 root so prototype shortcuts never fire while typing in it (in fact at window
 capture). `focusin`/`focusout` whose target is inside the overlay stop there too,
 so a host focus trap (MUI's FocusTrap: a document `focusin` listener that refocuses

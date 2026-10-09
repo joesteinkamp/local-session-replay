@@ -1,26 +1,23 @@
-/* TestKit overlay. Lives in a shadow root; nothing here leaks to the prototype. */
+/* TestKit overlay. Lives in a shadow root; nothing here leaks to the prototype.
+   Hi-vis yellow and black so it reads as a tool, not part of the prototype,
+   on light and dark apps alike (ui.pen → 01 · Overlay bubble, 07 · C). */
 
 :host {
+  --tk-bubble-bg: #ffd60a;
+  --tk-bubble-ink: #111111;
+  --tk-bubble-ink-muted: #3f3f46;
+  --tk-bubble-hover: rgba(17, 17, 17, 0.1);
+  --tk-bubble-divider: rgba(17, 17, 17, 0.25);
+  --tk-bubble-rec: #dc2626;
+  --tk-bubble-error: #991b1b;
   --tk-bg: #16181d;
-  --tk-bg-raised: #20232a;
-  --tk-bg-control: #2a2e36;
-  --tk-bg-control-hover: #353a44;
-  --tk-border: #3a3f4a;
-  --tk-border-strong: #6b7280;
   --tk-text: #f1f3f5;
   --tk-text-muted: #b4bac5;
-  --tk-accent: #2563eb;
-  --tk-accent-hover: #1d4ed8;
-  --tk-danger: #dc2626;
-  --tk-danger-hover: #b91c1c;
-  --tk-danger-text: #fca5a5;
-  --tk-rec: #ef4444;
-  --tk-ok: #4ade80;
   --tk-warn: #fbbf24;
-  --tk-focus: #93c5fd;
-  --tk-radius: 10px;
-  --tk-radius-sm: 6px;
-  --tk-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.25);
+  --tk-danger-text: #fca5a5;
+  --tk-focus-dark: #93c5fd;
+  --tk-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+  --tk-shadow-card: 0 8px 28px rgba(0, 0, 0, 0.35);
   --tk-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -28,7 +25,7 @@
 
 .tk-layer {
   font: 14px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  color: var(--tk-text);
+  color: var(--tk-bubble-ink);
   -webkit-font-smoothing: antialiased;
   text-align: left;
   letter-spacing: normal;
@@ -50,11 +47,19 @@
 
 :focus { outline: none; }
 :focus-visible {
-  outline: 2px solid var(--tk-focus);
+  outline: 2px solid var(--tk-bubble-ink);
   outline-offset: 2px;
 }
 
-/* ---- Bubble ---- */
+button {
+  font: inherit;
+  color: inherit;
+  margin: 0;
+}
+
+svg { width: 16px; height: 16px; flex: none; }
+
+/* ---- Bubble (collapsed, outside recording) ---- */
 
 .tk-bubble {
   position: fixed;
@@ -64,44 +69,72 @@
   gap: 8px;
   min-width: 44px;
   height: 44px;
-  padding: 0 14px;
-  border: 1px solid var(--tk-border-strong);
+  padding: 0 12px;
+  border: 2px solid var(--tk-bubble-ink);
   border-radius: 22px;
-  background: var(--tk-bg);
-  color: var(--tk-text);
+  background: var(--tk-bubble-bg);
   box-shadow: var(--tk-shadow);
-  font: inherit;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
   cursor: grab;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   transition: left 180ms var(--tk-ease), right 180ms var(--tk-ease), top 180ms var(--tk-ease);
 }
-.tk-bubble:hover { background: var(--tk-bg-raised); }
-.tk-bubble.is-dragging {
+.tk-bubble.is-text { padding: 0 16px; }
+.tk-bubble.is-dragging, .tk-bar.is-dragging {
   cursor: grabbing;
   transition: none;
 }
-.tk-bubble.is-idle { padding: 0 12px; }
 
 .tk-logo {
   display: inline-grid;
   place-items: center;
-  width: 22px;
   height: 22px;
+  padding: 0 4px;
   border-radius: 6px;
-  background: var(--tk-accent);
-  color: #fff;
+  background: var(--tk-bubble-ink);
+  color: var(--tk-bubble-bg);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
+  line-height: 1;
 }
 
-/* ---- Status indicators (shared by bubble and panel header) ---- */
+/* ---- Dock: the recording bar and the card that opens beside it ---- */
 
-.tk-status {
+.tk-dock {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  max-width: calc(100vw - 24px);
+  pointer-events: none;
+}
+.tk-dock.is-left { align-items: flex-start; }
+.tk-dock > * { pointer-events: auto; }
+
+/* ---- Recording bar ---- */
+
+.tk-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  height: 48px;
+  padding: 0 7px 0 16px;
+  border: 2px solid var(--tk-bubble-ink);
+  border-radius: 24px;
+  background: var(--tk-bubble-bg);
+  box-shadow: var(--tk-shadow);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  white-space: nowrap;
+}
+
+.tk-rec {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -114,311 +147,80 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--tk-rec);
+  background: var(--tk-bubble-rec);
   flex: none;
+  animation: tk-pulse 1.6s ease-in-out infinite;
 }
-.tk-status.is-recording .tk-dot { animation: tk-pulse 1.6s ease-in-out infinite; }
-.tk-status.is-paused .tk-dot {
+.tk-rec.is-paused .tk-dot {
   background: transparent;
-  border: 2px solid var(--tk-warn);
+  border: 2px solid var(--tk-bubble-ink);
+  animation: none;
 }
-.tk-status.is-paused { color: var(--tk-warn); }
 
 @keyframes tk-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
 
-.tk-time {
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.tk-mic {
-  display: inline-flex;
-  width: 18px;
-  height: 18px;
-  flex: none;
-}
-.tk-mic-glyph { display: flex; width: 100%; height: 100%; }
-.tk-mic svg { width: 100%; height: 100%; }
-.tk-mic.is-live { color: var(--tk-ok); }
-.tk-mic.is-muted, .tk-mic.is-pending, .tk-mic.is-reconnecting { color: var(--tk-warn); }
-.tk-mic.is-denied, .tk-mic.is-error { color: var(--tk-danger-text); }
-.tk-mic.is-off, .tk-mic.is-paused { color: var(--tk-text-muted); }
-
-/* ---- Panel ---- */
-
-.tk-panel {
-  position: fixed;
-  width: 340px;
-  max-width: calc(100vw - 24px);
-  display: flex;
-  flex-direction: column;
-  background: var(--tk-bg);
-  border: 1px solid var(--tk-border);
-  border-radius: var(--tk-radius);
-  box-shadow: var(--tk-shadow);
-  overflow: hidden;
-  animation: tk-in 160ms var(--tk-ease);
-}
-
-@keyframes tk-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
-}
-
-.tk-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 8px 8px 14px;
-  border-bottom: 1px solid var(--tk-border);
-  background: var(--tk-bg-raised);
-  min-height: 48px;
-}
-.tk-head-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 700;
-  min-width: 0;
-}
-.tk-head-study {
-  color: var(--tk-text-muted);
-  font-weight: 500;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tk-head-indicators {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.tk-head-spacer { flex: 1; }
-
-.tk-body {
-  padding: 14px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.tk-h {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1.3;
-}
-.tk-p {
-  margin: 0;
-  color: var(--tk-text-muted);
-}
-.tk-p.is-strong { color: var(--tk-text); }
-.tk-inline {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.tk-eyebrow {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--tk-text-muted);
-}
-
-.tk-prompt {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.tk-meta {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
-  margin: 0;
-}
-.tk-meta dt { color: var(--tk-text-muted); }
-.tk-meta dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
-.tk-card {
-  padding: 12px;
-  border: 1px solid var(--tk-border);
-  border-radius: var(--tk-radius-sm);
-  background: var(--tk-bg-raised);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.tk-notice {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: var(--tk-radius-sm);
-  border-left: 3px solid var(--tk-border-strong);
-  background: var(--tk-bg-raised);
-  overflow-wrap: anywhere;
-}
-.tk-notice.is-error { border-left-color: var(--tk-danger); color: var(--tk-danger-text); }
-.tk-notice.is-warn { border-left-color: var(--tk-warn); }
-.tk-notice.is-ok { border-left-color: var(--tk-ok); }
-
-.tk-countdown {
-  font-variant-numeric: tabular-nums;
-  color: var(--tk-text-muted);
-  margin: 0;
-}
-.tk-countdown.is-over { color: var(--tk-warn); font-weight: 600; }
-
-.tk-hint summary {
-  cursor: pointer;
-  color: var(--tk-text-muted);
-  border-radius: 4px;
-  padding: 2px 0;
-}
-.tk-hint summary:hover { color: var(--tk-text); }
-.tk-hint p { margin: 6px 0 0; }
-
-/* ---- Form controls ---- */
-
-.tk-check {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  cursor: pointer;
-  font-weight: 600;
-}
-.tk-check input {
-  width: 20px;
+.tk-divider {
+  width: 1.5px;
   height: 20px;
-  margin: 0;
+  background: var(--tk-bubble-divider);
   flex: none;
-  accent-color: var(--tk-accent);
+}
+
+.tk-step {
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
 }
-
-.tk-label {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.tk-textarea {
-  width: 100%;
-  min-height: 84px;
-  padding: 8px 10px;
-  border: 1px solid var(--tk-border-strong);
-  border-radius: var(--tk-radius-sm);
-  background: var(--tk-bg);
-  color: var(--tk-text);
-  font: inherit;
-  resize: vertical;
-}
-
-.tk-meter {
-  position: relative;
-  height: 10px;
-  border-radius: 5px;
-  background: var(--tk-bg-control);
-  border: 1px solid var(--tk-border-strong);
-  overflow: hidden;
-}
-.tk-meter-fill {
-  height: 100%;
-  width: 100%;
-  background: var(--tk-ok);
-  transform-origin: left center;
-  transform: scaleX(0);
-}
-.tk-meter-mark {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--tk-text);
-}
+.tk-step:hover { text-decoration: underline; }
 
 /* ---- Buttons ---- */
 
-.tk-actions {
-  position: sticky;
-  bottom: -14px;
-  margin: 0 -14px -14px;
-  padding: 10px 14px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: var(--tk-bg);
-  border-top: 1px solid var(--tk-border);
-}
-
-.tk-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.tk-row.is-end { justify-content: flex-end; }
-
-.tk-btn {
+.tk-pill {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
-  min-height: 36px;
+  height: 34px;
   padding: 0 14px;
-  border: 1px solid var(--tk-border-strong);
-  border-radius: var(--tk-radius-sm);
-  background: var(--tk-bg-control);
-  color: var(--tk-text);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
+  border: 0;
+  border-radius: 17px;
+  background: var(--tk-bubble-ink);
+  color: var(--tk-bubble-bg);
+  font-weight: 700;
   white-space: nowrap;
+  cursor: pointer;
 }
-.tk-btn:hover:not(:disabled) { background: var(--tk-bg-control-hover); }
-.tk-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-.tk-btn.is-primary {
-  background: var(--tk-accent);
-  border-color: var(--tk-accent);
-  color: #fff;
-}
-.tk-btn.is-primary:hover:not(:disabled) { background: var(--tk-accent-hover); }
-.tk-btn.is-danger {
-  background: var(--tk-danger);
-  border-color: var(--tk-danger);
-  color: #fff;
-}
-.tk-btn.is-danger:hover:not(:disabled) { background: var(--tk-danger-hover); }
-.tk-btn.is-danger-quiet { color: var(--tk-danger-text); }
-.tk-btn.is-grow { flex: 1; }
-.tk-btn.is-icon {
-  width: 32px;
-  min-height: 32px;
+.tk-pill:hover:not(:disabled) { background: #2b2b2b; }
+.tk-pill:disabled { cursor: not-allowed; opacity: 0.6; }
+
+.tk-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
   padding: 0;
-  border-color: transparent;
+  border: 1.5px solid var(--tk-bubble-ink);
+  border-radius: 50%;
   background: transparent;
+  cursor: pointer;
 }
-.tk-btn.is-icon:hover { background: var(--tk-bg-control); }
-.tk-btn svg { width: 16px; height: 16px; flex: none; }
+.tk-icon-btn:hover { background: var(--tk-bubble-hover); }
+
+.tk-link {
+  padding: 6px 2px;
+  border: 0;
+  background: transparent;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
 
 .tk-spinner {
   width: 14px;
@@ -430,13 +232,119 @@
 }
 @keyframes tk-spin { to { transform: rotate(360deg); } }
 
+/* ---- Yellow cards: setup, finish, other tab ---- */
+
+.tk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 340px;
+  max-width: 100%;
+  padding: 20px;
+  border: 2px solid var(--tk-bubble-ink);
+  border-radius: 14px;
+  background: var(--tk-bubble-bg);
+  box-shadow: var(--tk-shadow-card);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: tk-in 160ms var(--tk-ease);
+}
+
+@keyframes tk-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.tk-card-h {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.tk-card-p {
+  margin: 0;
+  color: var(--tk-bubble-ink-muted);
+  overflow-wrap: anywhere;
+}
+.tk-card-error {
+  margin: 0;
+  color: var(--tk-bubble-error);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.tk-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.tk-card > .tk-logo, .tk-done-icon { align-self: flex-start; }
+.tk-done-icon svg { width: 28px; height: 28px; }
+
+/* ---- Prompt card (dark, above or below the bar) ---- */
+
+.tk-prompt-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 360px;
+  max-width: 100%;
+  padding: 16px;
+  border: 2px solid var(--tk-bubble-ink);
+  border-radius: 12px;
+  background: var(--tk-bg);
+  color: var(--tk-text);
+  box-shadow: var(--tk-shadow);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.tk-prompt-card :focus-visible { outline-color: var(--tk-focus-dark); }
+.tk-prompt-card .tk-card-error { color: var(--tk-danger-text); }
+
+.tk-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tk-eyebrow {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--tk-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.tk-eyebrow.is-over { color: var(--tk-warn); }
+.tk-prompt {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.tk-collapse {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--tk-text-muted);
+  cursor: pointer;
+}
+.tk-collapse:hover { color: var(--tk-text); }
+
 @media (prefers-reduced-motion: reduce) {
-  .tk-bubble, .tk-panel { transition: none; animation: none; }
-  .tk-status.is-recording .tk-dot { animation: none; }
+  .tk-bubble, .tk-card { transition: none; animation: none; }
+  .tk-dot { animation: none; }
   .tk-spinner { animation-duration: 2.4s; }
 }
 
 @media (forced-colors: active) {
-  .tk-bubble, .tk-panel, .tk-btn { border: 1px solid CanvasText; }
-  .tk-dot, .tk-meter-fill { background: Highlight; }
+  .tk-bubble, .tk-bar, .tk-card, .tk-prompt-card, .tk-pill, .tk-icon-btn { border: 1px solid CanvasText; }
+  .tk-dot { background: Highlight; }
 }

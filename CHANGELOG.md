@@ -1,5 +1,12 @@
 # Change Log
 
+## Happy-path overlay in hi-vis yellow (2026-10-09, Claude)
+
+- **What:** the overlay is now three views. A setup card (Agree and start / Screen only) replaces pre-flight. While recording, a bar (REC, 1/3, Next/Finish, Stop) sits in place of the bubble, with the task on a card beside it. A finish card (Download session / Discard) replaces the stopped panel. Everything is safety yellow with black type. Pause, Mute, Skip task, the consent checkbox, the mic level check, follow-up questions, success hints, mic-recovery notices, stop and new-session confirms, and the elapsed clock are gone from the UI. `ui.pen` carries the designs (01, 01b, 07).
+- **Ask:** commit the "C · Happy path" design as the only panel states, after exploring alternatives on the canvas to simplify panels that had grown to 4–5 buttons per state and to stand out on both light and dark prototypes.
+- **Why this approach:** most sessions are agree → tasks → download, so the UI serves that and nothing else. Pressing Agree is the consent, and `start()` already asks for the mic, so no controller or data-model change was needed. Pause, mute, skip and retry stay in the controller, unused by the UI. Self-reported Skip was dropped because researchers judge success from the replay. The one guard kept is a second click to discard an undownloaded session, since that loses data nothing else holds.
+- **Rejected:** a ⋯ overflow menu that kept every action one click deeper (direction A); keeping Pause behind Stop (direction B); showing mic status in the bar (the live region still announces mic changes for screen readers). The browser harness now drives pause, mute and retry through the controller instead of buttons, and scenario I tests the happy path through the UI.
+
 ## Hide page errors from the summary and replay (2026-10-08, Claude)
 
 - **What:** the agent summary and the replay player no longer show the prototype's JS errors or promise rejections: no trail lines, Errors sections or counts, timeline ticks, legend item or task badges. The errors are still logged and kept in the raw JSON.

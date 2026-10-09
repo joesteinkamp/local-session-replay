@@ -182,22 +182,30 @@ const waitPhase = (page, phase) =>
 const waitAudio = (page, status, timeout = 10_000) =>
   waitFor(page, (s) => window.TestKit?.controller?.getState().audio.status === s, status, { timeout, what: `audio ${status}` });
 
+// Opens the setup or finish card. While recording there is nothing to open:
+// the bar (and its task card) is always showing.
 async function openPanel(page) {
-  if (await page.locator('.tk-panel:not([hidden])').count()) return;
+  if (await page.locator('.tk-bar:not([hidden]), .tk-card:not([hidden])').count()) return;
   await page.locator('.tk-bubble').click();
-  await page.locator('.tk-panel:not([hidden])').waitFor();
+  await page.locator('.tk-card:not([hidden])').waitFor();
 }
 
 const fid = (page, id) => page.locator(`[data-fid="${id}"]`);
+// The overlay is happy-path only (no mic test, pause, mute, retry, or skip
+// buttons), so the audio scenarios drive those through the controller.
+const ctl = (page, method, ...args) => page.evaluate(([m, a]) => window.TestKit.controller[m](...a), [method, args]);
 
+// Setup with a mic test first (the controller's preflight), so the mic is
+// live and audible before Start, as a facilitator checking it would have it.
 async function startWithMic(page, { url = `${DEMO}/index.html?test=1` } = {}) {
   await page.goto(url);
   await page.locator('#testkit-root').waitFor({ state: 'attached' });
-  await openPanel(page);
-  await fid(page, 'start').click();
-  await fid(page, 'consent').check();
-  await fid(page, 'test-mic').click();
-  await page.locator('.tk-notice.is-ok', { hasText: 'We can hear you' }).waitFor({ timeout: 15_000 });
+  const mic = await page.evaluate(async () => {
+    await window.TestKit.controller.beginPreflight();
+    return window.TestKit.controller.requestMic();
+  });
+  assert.ok(mic?.ok, `mic test: ${JSON.stringify(mic)}`);
+  await waitFor(page, () => window.TestKit.controller.getMicLevel() > 0.15, null, { timeout: 15_000, what: 'audible mic level' });
 }
 
 // Records every (time, phase, audio status) the controller emits on this page.
@@ -237,7 +245,7 @@ async function assertLiveAfterFirstChunk(page, label) {
 // Preflight's level check also reports 'live', so wait for the session first.
 async function beginRecording(page) {
   await traceStatus(page);
-  await fid(page, 'start-session').click();
+  await ctl(page, 'start', { consent: true, audio: true });
   await waitPhase(page, 'recording');
   await waitAudio(page, 'live');
 }
@@ -260,14 +268,16 @@ async function idbAudio(page) {
   });
 }
 
+// Stop from the bar, then download from the finish card. `line` is the
+// saved-audio verdict, which the finish card shows (lowercased) after the tally.
 async function stopAndDownload(page, name) {
-  await openPanel(page);
   await fid(page, 'stop').click();
-  await fid(page, 'confirm-yes').click();
   await waitPhase(page, 'stopped');
   await waitFor(page, () => !!window.TestKit.controller.getState().savedAudio, null, { what: 'savedAudio' });
-  const line = await page.locator('[data-saved-audio]').textContent();
   const savedAudio = (await state(page)).savedAudio;
+  const line = savedAudio.label;
+  const cardLine = await page.locator('.tk-card .tk-card-p').textContent();
+  assert.ok(cardLine.endsWith(line.charAt(0).toLowerCase() + line.slice(1)), `finish card shows the verdict: ${cardLine}`);
   const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
   const file = path.join(outDir, `${name}.html`);
   await download.saveAs(file);
@@ -366,9 +376,9 @@ async function playerAlignment(page, speeds = [1, 2, 4]) {
 
 const scenarios = {};
 
-// A: baseline — pass mic check, Continue-without-audio still offered, mute,
-// pause, two navigations (mute carried across one), forced track.stop() →
-// Audio stopped (announced while collapsed) → Retry, Stop, export, decode,
+// A: baseline — pass mic check, mute, pause, two navigations (mute carried
+// across one), forced track.stop() → Audio stopped (announced through the live
+// region; the bar shows no mic state) → Retry, Stop, export, decode,
 // gap list, alignment at 1×/2×/4×, 8× mute, seek across segments.
 scenarios.A = async (browser) => {
   const r = {};
@@ -379,10 +389,8 @@ scenarios.A = async (browser) => {
   page.on('pageerror', (e) => console.log('  [page error]', e.message));
 
   await startWithMic(page);
-  r.continueWithoutAudioAfterPass = await fid(page, 'skip-audio').isVisible();
-  assert.ok(r.continueWithoutAudioAfterPass, 'Continue without audio stays after a passed check');
   await traceStatus(page);
-  await fid(page, 'start-session').click();
+  await ctl(page, 'start', { consent: true, audio: true });
   await waitPhase(page, 'recording');
   const t = Date.now();
   await waitAudio(page, 'live');
@@ -390,21 +398,20 @@ scenarios.A = async (browser) => {
   r.liveAfterChunk = await assertLiveAfterFirstChunk(page, 'A start');
 
   await sleep(3000);
-  await fid(page, 'mute').click();
+  await ctl(page, 'toggleMute');
   await waitAudio(page, 'muted');
   const muteAt = Date.now();
   await sleep(3000);
-  await fid(page, 'mute').click();
+  await ctl(page, 'toggleMute');
   const unmuteAt = Date.now();
   await waitAudio(page, 'live');
   await sleep(2000);
-  await fid(page, 'pause').click();
+  await ctl(page, 'pause');
   await waitPhase(page, 'paused');
   const pauseAt = Date.now();
   r.pausedBadgeNotLive = (await state(page)).audio.status !== 'live';
-  r.pauseCopy = await page.locator('.tk-notice.is-warn').first().textContent();
   await sleep(2500);
-  await fid(page, 'resume').click();
+  await ctl(page, 'resume');
   const resumeAt = Date.now();
   await waitAudio(page, 'live');
   await sleep(2500);
@@ -416,21 +423,18 @@ scenarios.A = async (browser) => {
   await waitAudio(page, 'live');
   await sleep(3000);
   // Mute here and carry it across navigation 2.
-  await openPanel(page);
-  await fid(page, 'mute').click();
+  await ctl(page, 'toggleMute');
   await waitAudio(page, 'muted');
   await page.goto(`${DEMO}/company.html?name=Meridian%20Health`);
   await waitPhase(page, 'recording');
   await waitAudio(page, 'muted');
   r.muteSurvivedNavigation = (await state(page)).muted === true;
   await sleep(1500);
-  await openPanel(page);
-  await fid(page, 'mute').click();
+  await ctl(page, 'toggleMute');
   await waitAudio(page, 'live');
   await sleep(3000);
 
-  // Device loss: stop the track locally (fires no 'ended'), panel collapsed.
-  await fid(page, 'collapse').click();
+  // Device loss: stop the track locally (fires no 'ended').
   const killAt = Date.now();
   await page.evaluate(() => window.__harness.streams.at(-1).getAudioTracks().forEach((tr) => tr.stop()));
   await waitAudio(page, 'error', 5000);
@@ -439,11 +443,9 @@ scenarios.A = async (browser) => {
   r.announcedCollapsed = await page.locator('.tk-layer > .tk-sr[role="status"]').textContent();
   r.visualStillRecording = (await state(page)).phase === 'recording';
   await sleep(3000);
-  await openPanel(page);
-  r.stoppedNotice = await page.locator('.tk-notice.is-error').first().textContent();
   const retryAt = Date.now();
   await traceStatus(page);
-  await fid(page, 'mic-retry').click();
+  await ctl(page, 'retryMic');
   await waitAudio(page, 'live');
   r.msRetryToLive = Date.now() - retryAt;
   r.retryTrace = await page.evaluate(() => window.__trace.map(([, , s]) => s).filter((s, i, a) => s !== a[i - 1]));
@@ -588,9 +590,6 @@ scenarios.B = async (browser) => {
   await waitAudio(page, 'denied');
   const s3 = await state(page);
   r.page3 = { status: s3.audio.status, stopAsking: s3.audio.stopAsking, gum: await page.evaluate(() => window.__harness.gum) };
-  await openPanel(page);
-  r.blockedNotice = await page.locator('.tk-notice.is-error').first().textContent();
-  r.blockedPrimary = await fid(page, 'mic-help').textContent();
   await sleep(2000);
   await page.goto(`${DEMO}/index.html`);
   await waitPhase(page, 'recording');
@@ -621,8 +620,8 @@ scenarios.B = async (browser) => {
   return r;
 };
 
-// C: Continue without audio after a passed check → screen-only consent, no
-// capture, mic released, "No audio recorded", zero segments.
+// C: screen only after a passed mic test → no capture, mic released,
+// "No audio recorded", zero segments.
 scenarios.C = async (browser) => {
   const r = {};
   const context = await browser.newContext({ acceptDownloads: true });
@@ -630,10 +629,7 @@ scenarios.C = async (browser) => {
   await context.addInitScript(INSTRUMENT);
   const page = await context.newPage();
   await startWithMic(page);
-  await fid(page, 'skip-audio').click();
-  r.consentText = await page.locator('#tk-consent-text').textContent();
-  r.checkboxLabel = await page.locator('.tk-check span').textContent();
-  await fid(page, 'start-session').click();
+  await ctl(page, 'start', { consent: true, audio: false });
   await waitPhase(page, 'recording');
   await sleep(1000);
   r.micReleased = await page.evaluate(() => window.__harness.streams.every((s) => s.getTracks().every((t) => t.readyState === 'ended')));
@@ -648,8 +644,6 @@ scenarios.C = async (browser) => {
   const payload = await readExport(file);
   r.segments = payload.audio.length;
   r.verdict = reportOf(payload).label;
-  assert.match(r.consentText, /screen activity on this device only/);
-  assert.ok(!/microphone/i.test(r.consentText));
   assert.ok(r.micReleased);
   assert.equal(r.gumAfterNavigation, 0);
   assert.equal(r.segments, 0);
@@ -670,10 +664,12 @@ scenarios.D = async (browser) => {
   let page = await context.newPage();
   await page.goto(`${DEMO}/index.html?test=1`);
   await page.evaluate(() => localStorage.setItem('harness:gumDelay', '1500'));
-  await openPanel(page);
-  await fid(page, 'start').click();
-  await fid(page, 'test-mic').click();
-  await fid(page, 'cancel').click();
+  await page.evaluate(async () => {
+    const c = window.TestKit.controller;
+    await c.beginPreflight();
+    window.__micTest = c.requestMic();
+  });
+  await ctl(page, 'cancelPreflight');
   await waitPhase(page, 'idle');
   await sleep(2200);
   r.cancelLateGrant = { streams: await page.evaluate(() => window.__harness.streams.length), released: await allEnded(page) };
@@ -722,12 +718,12 @@ scenarios.E = async (browser) => {
     localStorage.setItem('harness:synth', '1');
     localStorage.removeItem('harness:beeps');
   });
-  await openPanel(page);
-  await fid(page, 'start').click();
-  await fid(page, 'consent').check();
-  await fid(page, 'test-mic').click();
-  // Beeps are 80 ms every 2 s: too sparse for the level check, so skip it via
-  // the controller (the mic check UI is covered by scenario A).
+  // Beeps are 80 ms every 2 s: too sparse for startWithMic's level check.
+  await page.evaluate(async () => {
+    const c = window.TestKit.controller;
+    await c.beginPreflight();
+    await c.requestMic();
+  });
   await sleep(500);
   await page.evaluate(() => window.TestKit.controller.start({ consent: true, audio: true }));
   await waitAudio(page, 'live');
@@ -931,14 +927,12 @@ async function seqGapPipeline(browser) {
   await startWithMic(page);
   await beginRecording(page);
   await sleep(4500);
-  await fid(page, 'pause').click();
+  await ctl(page, 'pause');
   await waitPhase(page, 'paused');
-  await fid(page, 'resume').click();
+  await ctl(page, 'resume');
   await waitAudio(page, 'live');
   await sleep(5000);
-  await openPanel(page);
   await fid(page, 'stop').click();
-  await fid(page, 'confirm-yes').click();
   await waitPhase(page, 'stopped');
   r.deleted = await page.evaluate(async () => {
     const id = window.TestKit.controller.getState().sessionId;
@@ -1075,11 +1069,11 @@ scenarios.G = async (browser) => {
   return r;
 };
 
-// I: product gaps found in a real-app integration (no audio needed).
+// I: the overlay's happy path, through its own buttons (no audio needed).
 //  - a redirect that strips ?test=1 before init() still activates (snapshot)
-//  - Skip task shows as Skipped in the stopped panel, summary and player
-//  - Start new session: straight to setup once downloaded (the downloaded
-//    session is deleted when the next starts); otherwise asks first
+//  - Screen only → bar with the task card → Next (a double click advances
+//    once) → Finish → finish card → Download → Discard
+//  - Discard of an undownloaded session takes a second click
 scenarios.I = async (browser) => {
   const r = {};
   const context = await browser.newContext({ acceptDownloads: true });
@@ -1112,92 +1106,58 @@ scenarios.I = async (browser) => {
     db.close();
     return ids;
   });
-  const startScreenOnly = async () => {
-    await fid(page, 'skip-audio').click();
-    await fid(page, 'consent').check();
-    await fid(page, 'start-session').click();
-    await waitPhase(page, 'recording');
-  };
-
+  // Agree with Screen only (no mic in this context) → Next ×2 → Finish →
+  // Download → Discard.
   await openPanel(page);
-  await fid(page, 'start').click();
-  await startScreenOnly();
-  // The pause toggle's data-fid follows its label, and keyboard focus stays on it.
-  await fid(page, 'pause').focus();
-  await page.keyboard.press('Enter');
-  await waitPhase(page, 'paused');
-  r.pausedToggle = await page.evaluate(() => document.querySelector('#testkit-root').shadowRoot.activeElement?.dataset.fid);
-  r.pausedLabel = await fid(page, 'resume').textContent();
-  await page.keyboard.press('Enter');
+  await fid(page, 'screen-only').click();
   await waitPhase(page, 'recording');
-  r.resumedToggle = await page.evaluate(() => document.querySelector('#testkit-root').shadowRoot.activeElement?.dataset.fid);
-  assert.deepEqual([r.pausedToggle, r.pausedLabel, r.resumedToggle], ['resume', 'Resume', 'pause']);
-  assert.equal(await fid(page, 'pause').textContent(), 'Pause');
+  r.bar = { step: await fid(page, 'step').textContent(), prompt: await page.locator('.tk-prompt').textContent() };
   // Double clicks advance once, including on the second-to-last task.
-  await fid(page, 'skip-task').dblclick();
+  await fid(page, 'next').dblclick();
   await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 1, null, { what: 'task 2' });
   await sleep(500);
-  r.afterDblSkip = (await state(page)).taskIndex;
+  r.afterDblNext1 = (await state(page)).taskIndex;
   await fid(page, 'next').dblclick();
   await waitFor(page, () => window.TestKit.controller.getState().taskIndex === 2, null, { what: 'task 3' });
   await sleep(500);
-  r.afterDblNext = { taskIndex: (await state(page)).taskIndex, phase: (await state(page)).phase };
-  assert.equal(r.afterDblSkip, 1, 'double-clicked Skip advanced once');
-  assert.deepEqual(r.afterDblNext, { taskIndex: 2, phase: 'recording' }, 'double-clicked Next advanced once');
-  await fid(page, 'skip-task').click(); // task 3 has a follow-up: Skip bypasses it
+  r.afterDblNext2 = { taskIndex: (await state(page)).taskIndex, phase: (await state(page)).phase };
+  r.lastLabel = await fid(page, 'next').textContent();
+  await fid(page, 'next').click(); // task 3's followUp isn't asked: the overlay is happy-path only
   await waitPhase(page, 'stopped');
-  r.panelTally = await page.locator('.tk-meta dd').nth(2).textContent();
-  r.panelHeading = await page.locator('.tk-h').textContent();
-  const firstId = (await state(page)).sessionId;
+  r.finishLine = await page.locator('.tk-card .tk-card-p').textContent();
   const [download] = await Promise.all([page.waitForEvent('download'), fid(page, 'download').click()]);
-  const file = path.join(outDir, 'I-skipped.html');
+  const file = path.join(outDir, 'I-happy-path.html');
   await download.saveAs(file);
   const payload = await readExport(file);
   r.summaryTasks = payload.summaryMarkdown.split('\n').find((l) => l.startsWith('- Tasks completed:'));
   r.summaryStatuses = payload.summaryMarkdown.split('\n').filter((l) => l.startsWith('- Status:'));
-  const player = await openPlayer(context, file);
-  r.playerTasks = await player.locator('.tk-meta').textContent();
-  r.playerSkippedBadges = await player.locator('.tk-badge', { hasText: 'Skipped' }).count();
-  await player.close();
-  assert.equal(r.panelTally, '1 of 3 completed, 2 skipped');
-  assert.equal(r.panelHeading, 'Session complete');
-  assert.equal(r.summaryTasks, '- Tasks completed: 1 of 3, 2 skipped');
-  assert.deepEqual(r.summaryStatuses, ['- Status: Skipped', '- Status: Completed', '- Status: Skipped']);
-  assert.match(r.playerTasks, /1 of 3 completed, 2 skipped/);
-  assert.equal(r.playerSkippedBadges, 2);
-
-  // Downloaded: Start new session goes straight to setup; Cancel comes back.
-  await fid(page, 'new-session').click();
-  await waitPhase(page, 'preflight');
-  r.previousNotice = await page.locator('[data-previous-download]').textContent();
-  assert.match(r.previousNotice, /previous session’s file was downloaded at/);
-  await fid(page, 'cancel').click();
-  await waitPhase(page, 'stopped');
-  r.backToSame = (await state(page)).sessionId === firstId;
-  await fid(page, 'new-session').click();
-  await waitPhase(page, 'preflight');
-  await startScreenOnly();
-  const secondId = (await state(page)).sessionId;
-  r.afterSecondStart = await sessionsInDb();
-  assert.ok(r.backToSame, 'Cancel returns to the stopped session');
-  assert.deepEqual(r.afterSecondStart, [secondId], 'the downloaded session was deleted once the next one started');
-
-  // Not downloaded: asks first; Download first, then straight to setup.
-  await fid(page, 'stop').click();
-  await fid(page, 'confirm-yes').click();
-  await waitPhase(page, 'stopped');
-  await fid(page, 'new-session').click();
-  r.confirmText = await page.locator('#tk-new-q').textContent();
-  r.phaseWhileAsking = (await state(page)).phase;
-  await Promise.all([page.waitForEvent('download'), fid(page, 'confirm-download').click()]);
   await waitFor(page, () => window.TestKit.controller.getState().downloaded === true, null, { what: 'downloaded' });
-  await fid(page, 'new-session').click();
-  await waitPhase(page, 'preflight');
-  assert.match(r.confirmText, /hasn’t been downloaded/);
-  assert.equal(r.phaseWhileAsking, 'stopped');
-  await fid(page, 'cancel').click();
+  await fid(page, 'discard').click(); // downloaded: one click
+  await waitPhase(page, 'idle');
+  r.afterDiscard = await sessionsInDb();
+  assert.deepEqual(r.bar, { step: '1/3', prompt: 'Filter the list to healthcare companies' });
+  assert.equal(r.afterDblNext1, 1, 'double-clicked Next advanced once');
+  assert.deepEqual(r.afterDblNext2, { taskIndex: 2, phase: 'recording' }, 'double-clicked Next advanced once');
+  assert.equal(r.lastLabel, 'Finish');
+  assert.match(r.finishLine, /^3 of 3 tasks · \d\d:\d\d · no audio recorded$/);
+  assert.equal(r.summaryTasks, '- Tasks completed: 3 of 3');
+  assert.deepEqual(r.summaryStatuses, ['- Status: Completed', '- Status: Completed', '- Status: Completed']);
+  assert.deepEqual(r.afterDiscard, [], 'Discard deleted the downloaded session');
+
+  // Not downloaded: Stop from the bar, then Discard takes a second click.
+  await openPanel(page);
+  await fid(page, 'screen-only').click();
+  await waitPhase(page, 'recording');
+  await fid(page, 'stop').click();
   await waitPhase(page, 'stopped');
-  await page.evaluate(() => window.TestKit.controller.discard());
+  await fid(page, 'discard').click();
+  r.discardAsk = await fid(page, 'discard').textContent();
+  r.phaseWhileAsking = (await state(page)).phase;
+  await fid(page, 'discard').click();
+  await waitPhase(page, 'idle');
+  assert.equal(r.discardAsk, 'Discard without downloading?');
+  assert.equal(r.phaseWhileAsking, 'stopped');
+  assert.deepEqual(await sessionsInDb(), []);
   await context.close();
   return r;
 };
@@ -1335,7 +1295,7 @@ scenarios.K = async (browser) => {
   await openPanel(p2);
   await fid(p2, 'download').click();
   await waitFor(p2, () => window.TestKit.controller.getState().exportNeedsReload === true, null, { what: 'exportNeedsReload' });
-  r.reloadCopy = await p2.locator('.tk-notice.is-error').first().textContent();
+  r.reloadCopy = await p2.locator('.tk-card-error').first().textContent();
   r.retryLabel = await fid(p2, 'download').textContent();
   net.blockPlayer = false; // back online
   // Precondition (the bug): an in-page retry still fails, with no request made.
@@ -1416,8 +1376,8 @@ scenarios.L = async (browser) => {
   {
     const { context, page } = await run({ blockFromStart: true });
     await fid(page, 'download').click();
-    await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).waitFor({ timeout: 10_000 });
-    r.blockedError = await page.locator('.tk-notice.is-error', { hasText: 'Export failed' }).textContent();
+    await page.locator('.tk-card-error', { hasText: 'Export failed' }).waitFor({ timeout: 10_000 });
+    r.blockedError = await page.locator('.tk-card-error', { hasText: 'Export failed' }).textContent();
     r.blockedPhase = (await state(page)).phase;
     r.blockedRetryLabel = await fid(page, 'download').textContent(); // script path: in-page retry
     await page.evaluate(() => window.TestKit.controller.discard());
@@ -1429,7 +1389,7 @@ scenarios.L = async (browser) => {
   assert.equal(requests.filter((x) => x === 'cached-run').length, 1, 'prefetched once; the export used the cache');
   assert.match(r.blockedError, /Could not load the replay player/);
   assert.equal(r.blockedPhase, 'stopped');
-  assert.equal(r.blockedRetryLabel, 'Try download again');
+  assert.equal(r.blockedRetryLabel, 'Try again');
   assert.equal(requests.filter((x) => x === 'blocked-run').length, 2, 'prefetch failed silently and the export retried');
   return r;
 };
@@ -1518,12 +1478,12 @@ scenarios.N = async (browser) => {
     return document.activeElement === root && root.shadowRoot.activeElement?.dataset.fid || null;
   });
   await page.locator('.tk-bubble').click();
-  await page.locator('.tk-panel:not([hidden])').waitFor();
+  await page.locator('.tk-card:not([hidden])').waitFor();
   r.afterOpen = await inOverlay();
   const tabbed = [];
-  // Idle panel: [collapse] [Start test session], focus starts on Start.
+  // Setup card: [Agree and start] [Screen only], focus starts on Agree and start.
   // Tabbing past the overlay's ends would leave it, trap or not.
-  for (const key of ['Shift+Tab', 'Tab', 'Shift+Tab']) {
+  for (const key of ['Tab', 'Shift+Tab', 'Tab']) {
     await page.keyboard.press(key);
     await sleep(120); // let the trap's interval run
     tabbed.push((await inOverlay()) || (await page.evaluate(() => `outside:${document.activeElement?.id || document.activeElement?.tagName}`)));
