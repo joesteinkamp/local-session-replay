@@ -319,6 +319,105 @@ function createTimeline({ t0, t1, spans, pauses, gaps, onSeek, onToggle }) {
   };
 }
 
+// ---------- speed menu ----------
+
+const SPEEDS = [0.5, 1, 1.25, 1.5, 2, 4, 8];
+// Lucide chevron-down / check, inline so the export stays offline.
+const lucide = (size, d) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${d}"/></svg>`;
+const ICON_CHEVRON = lucide(14, 'm6 9 6 6 6-6');
+const ICON_CHECK = lucide(16, 'M20 6 9 17l-5-5');
+
+// rrweb-player's row of speed buttons, collapsed into one "1× ⌄" button that
+// opens a menu upward over the replay (as in Slack's player). Menu-button
+// keyboard pattern: arrows move, Enter/Space pick, Escape closes.
+function createSpeedMenu({ speeds, initial, hasAudio, onChange }) {
+  let current = initial;
+  const value = h('span', { class: 'tk-speed-value' });
+  const button = h('button', {
+    type: 'button', class: 'tk-speed-btn', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-controls': 'tk-speed-menu',
+  }, h('span', { class: 'tk-sr' }, 'Playback speed '), value);
+  button.insertAdjacentHTML('beforeend', ICON_CHEVRON);
+  const items = speeds.map((s) => {
+    const item = h('div', { class: 'tk-speed-item', role: 'menuitemradio', tabindex: '-1', 'data-speed': s },
+      h('span', { class: 'tk-speed-check' }), `${s}×`,
+      hasAudio && s > MAX_AUDIBLE_RATE ? h('span', { class: 'tk-speed-note' }, 'No audio') : null);
+    item.firstChild.innerHTML = ICON_CHECK;
+    return item;
+  });
+  const menu = h('div', { class: 'tk-speed-menu', id: 'tk-speed-menu', role: 'menu', 'aria-label': 'Playback speed' }, ...items);
+  const popover = h('div', { class: 'tk-speed-popover', hidden: true },
+    h('div', { class: 'tk-speed-head', 'aria-hidden': 'true' }, 'Playback speed'), menu);
+  const el = h('div', { class: 'tk-speed' }, button, popover);
+
+  const render = () => {
+    value.textContent = `${current}×`;
+    items.forEach((it) => it.setAttribute('aria-checked', String(Number(it.dataset.speed) === current)));
+  };
+  const isOpen = () => !popover.hidden;
+  const close = (refocus) => {
+    if (!isOpen()) return;
+    popover.hidden = true;
+    button.setAttribute('aria-expanded', 'false');
+    if (refocus) button.focus();
+  };
+  // The focus ring only shows when the keyboard is driving the menu.
+  const open = (focusIndex, byKeyboard) => {
+    popover.classList.toggle('is-keyboard', Boolean(byKeyboard));
+    popover.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    const checked = items.findIndex((it) => it.getAttribute('aria-checked') === 'true');
+    items[focusIndex ?? Math.max(0, checked)].focus();
+  };
+  const pick = (s) => {
+    close(true);
+    if (s === current) return;
+    current = s;
+    render();
+    onChange(s);
+  };
+
+  // Keep focus where it is on press, so Safari (which never focuses buttons on
+  // click) doesn't blur the open menu and immediately reopen it.
+  button.addEventListener('mousedown', (ev) => ev.preventDefault());
+  // detail is 0 for clicks synthesized by Enter/Space.
+  button.addEventListener('click', (ev) => (isOpen() ? close(true) : open(undefined, ev.detail === 0)));
+  button.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault();
+    open(ev.key === 'ArrowUp' ? items.length - 1 : undefined, true);
+  });
+  menu.addEventListener('click', (ev) => {
+    const item = ev.target.closest('.tk-speed-item');
+    if (item) pick(Number(item.dataset.speed));
+  });
+  menu.addEventListener('keydown', (ev) => {
+    popover.classList.add('is-keyboard');
+    const i = items.indexOf(document.activeElement);
+    const move = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[ev.key];
+    if (move !== undefined) items[(move + items.length) % items.length].focus();
+    else if (ev.key === 'Enter' || ev.key === ' ') pick(Number(items[i].dataset.speed));
+    else if (ev.key === 'Escape') close(true);
+    else if (ev.key === 'Tab') close(false);
+    else return;
+    if (ev.key !== 'Tab') ev.preventDefault();
+  });
+  // Clicking anywhere else, the replay iframe included, takes focus away.
+  el.addEventListener('focusout', (ev) => {
+    if (!el.contains(ev.relatedTarget)) close(false);
+  });
+
+  render();
+  return {
+    el,
+    // Follow speed changes made elsewhere (TestKitPlayer.player.setSpeed).
+    set(s) {
+      if (s === current || !speeds.includes(s)) return;
+      current = s;
+      render();
+    },
+  };
+}
+
 // ---------- actions ----------
 
 function download(filename, text, type) {
@@ -593,7 +692,10 @@ function mount() {
         skipInactive: audio.length === 0,
         showWarning: false,
         mouseTail: !reducedMotion,
-        speedOption: [1, 2, 4, 8],
+        // rrweb-player rejects a speed outside speedOption; its buttons are
+        // hidden below in favor of the speed menu.
+        speedOption: SPEEDS,
+        speed: 1,
         tags: {
           'testkit:task-start': '#2563eb',
           'testkit:task-end': '#4b5260',
@@ -674,6 +776,12 @@ function mount() {
   stage.querySelector('.rr-controller input[type="checkbox"]')?.setAttribute('aria-label', 'Skip inactive periods');
   const isSkipping = () => replayer?.speedService?.state?.value === 'skipping';
   const speedNow = () => Number(replayer?.config?.speed) || 1;
+  // The buttons between play and fullscreen are rrweb-player's speed buttons.
+  [...controlButtons].slice(1, -1).forEach((b) => { b.hidden = true; });
+  const speedMenu = createSpeedMenu({
+    speeds: SPEEDS, initial: 1, hasAudio: audio.length > 0, onChange: (s) => player.setSpeed(s),
+  });
+  playButton?.after(speedMenu.el);
 
   const sync = () => {
     const wall = wallNow();
@@ -695,6 +803,7 @@ function mount() {
         return;
       }
     }
+    if (!isSkipping()) speedMenu.set(speedNow());
     audioSync?.update({ wall, playing, speed: speedNow(), skipping: isSkipping() });
   };
 

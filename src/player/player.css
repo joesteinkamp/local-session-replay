@@ -213,6 +213,85 @@ a:hover { color: var(--tk-text); }
 
 .tk-stage .rr-player__frame { border-radius: var(--tk-radius) var(--tk-radius) 0 0; background: #fff; }
 
+/* Speed menu: one "1× ⌄" button in rrweb-player's button bar, in place of its
+   row of speed buttons. The list opens upward over the replay. */
+.tk-speed { position: relative; margin: 0 4px; }
+
+.tk-speed-btn {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+  padding: 0 8px 0 12px;
+  font: 600 13px/1 var(--tk-font);
+  font-variant-numeric: tabular-nums;
+  color: var(--tk-text);
+  background: none;
+  border: 0;
+  border-radius: 16px;
+  cursor: pointer;
+}
+
+.tk-speed-btn svg { color: var(--tk-text-muted); transition: transform 160ms var(--tk-ease); }
+.tk-speed-btn:hover { background: var(--tk-bg-control); }
+.tk-speed-btn[aria-expanded='true'] { background: var(--tk-bg-control-hover); }
+.tk-speed-btn[aria-expanded='true'] svg { transform: rotate(180deg); }
+
+.tk-speed-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 10;
+  min-width: 168px;
+  padding: var(--tk-space-1);
+  background: var(--tk-bg-raised);
+  border: 1px solid var(--tk-border);
+  border-radius: var(--tk-radius);
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.16), 0 2px 6px rgba(16, 24, 40, 0.08);
+  animation: tk-speed-in 120ms var(--tk-ease);
+}
+
+@keyframes tk-speed-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+.tk-speed-head {
+  padding: var(--tk-space-2) var(--tk-space-3) var(--tk-space-1);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tk-text-muted);
+}
+
+.tk-speed-item {
+  display: flex;
+  align-items: center;
+  gap: var(--tk-space-2);
+  height: 32px;
+  padding: 0 var(--tk-space-3) 0 var(--tk-space-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--tk-text);
+  border-radius: var(--tk-radius-sm);
+  cursor: pointer;
+}
+
+.tk-speed-item:hover,
+.tk-speed-item:focus { background: var(--tk-bg-control); }
+.tk-speed-item:focus-visible { outline: none; }
+.tk-speed-popover.is-keyboard .tk-speed-item:focus { outline: 2px solid var(--tk-focus); outline-offset: -2px; }
+
+.tk-speed-item[aria-checked='true'] { font-weight: 600; background: var(--tk-accent-soft); }
+
+.tk-speed-check { display: flex; width: 16px; color: var(--tk-accent); visibility: hidden; }
+.tk-speed-item[aria-checked='true'] .tk-speed-check { visibility: visible; }
+
+.tk-speed-note { margin-left: auto; padding-left: var(--tk-space-3); font-size: 12px; font-weight: 400; color: var(--tk-text-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .tk-speed-popover { animation: none; }
+  .tk-speed-btn svg { transition: none; }
+}
+
 .tk-empty {
   padding: var(--tk-space-6);
   text-align: center;
