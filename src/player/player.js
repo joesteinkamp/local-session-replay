@@ -3,6 +3,10 @@
 import rrwebPlayer from 'rrweb-player';
 import RRWEB_CSS from 'rrweb-player/dist/style.css';
 import PLAYER_CSS from './player.css';
+// Variable-weight Latin subsets as base64 (build.mjs), so the design's type
+// renders offline: the export's CSP only allows data: fonts.
+import INTER_TIGHT from '@fontsource-variable/inter-tight/files/inter-tight-latin-wght-normal.woff2';
+import GEIST_MONO from '@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2';
 import {
   GAPS_MEANING, audioReport, buildSummary, buildTaskSpans, describeBrowser, detectRageClicks, formatDuration, overlapMs, pausedSpans,
   skippedSuffix, taskCounts,
@@ -24,7 +28,8 @@ const MIN_SKIPPABLE_PAUSE_MS = 1500;
 const CONTROLLER_HEIGHT = 80; // rrweb-player's fixed controller bar
 const RRWEB_META = 4;
 const RRWEB_FULL_SNAPSHOT = 2;
-const BAND_COLORS = 5;
+const BAND_COLORS = 3;
+const THEME_KEY = 'testkit:replay-theme';
 
 const reducedMotion = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -48,7 +53,8 @@ function h(tag, attrs = {}, ...children) {
 
 function injectStyles() {
   const style = document.createElement('style');
-  style.textContent = `${RRWEB_CSS}\n${PLAYER_CSS}`;
+  const face = (family, b64) => `@font-face{font-family:'${family}';src:url(data:font/woff2;base64,${b64}) format('woff2');font-weight:100 900;font-style:normal;font-display:swap}`;
+  style.textContent = `${face('Inter Tight', INTER_TIGHT)}\n${face('Geist Mono', GEIST_MONO)}\n${RRWEB_CSS}\n${PLAYER_CSS}`;
   document.head.append(style);
 }
 
@@ -226,15 +232,85 @@ function createAudioSync(segments, { onStatus }) {
   };
 }
 
+// ---------- icons ----------
+
+// Lucide icons, inline so the export stays offline.
+const svgIcon = (size, inner) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`;
+const lucide = (size, d) => svgIcon(size, `<path d="${d}"/>`);
+
+// ---------- theme ----------
+
+const THEME_ICONS = {
+  light: svgIcon(14, '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-17.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>'),
+  dark: svgIcon(14, '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>'),
+  system: svgIcon(14, '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8m-4-4v4"/>'),
+};
+
+// Light / Dark / System. The choice is remembered per browser (file:// pages
+// share one storage area, so it carries across exports); System follows the
+// viewer's OS setting live.
+function createThemeSwitch() {
+  const media = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
+  let choice = 'system';
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved in THEME_ICONS) choice = saved;
+  } catch {
+    // Storage can be off (privacy settings); the switch still works per visit.
+  }
+  const apply = () => {
+    document.documentElement.dataset.theme = choice === 'system' ? (media?.matches ? 'dark' : 'light') : choice;
+  };
+  media?.addEventListener?.('change', () => choice === 'system' && apply());
+  const buttons = Object.keys(THEME_ICONS).map((key) => {
+    const b = h('button', { type: 'button', role: 'radio', 'data-theme': key }, `${key[0].toUpperCase()}${key.slice(1)}`);
+    b.insertAdjacentHTML('afterbegin', THEME_ICONS[key]);
+    return b;
+  });
+  const render = () => buttons.forEach((b) => {
+    const on = b.dataset.theme === choice;
+    b.setAttribute('aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  const pick = (key) => {
+    choice = key;
+    try {
+      localStorage.setItem(THEME_KEY, key);
+    } catch {
+      // See above.
+    }
+    apply();
+    render();
+  };
+  const el = h('div', { class: 'tk-theme', role: 'radiogroup', 'aria-label': 'Theme' }, buttons);
+  el.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (b) pick(b.dataset.theme);
+  });
+  // Radio-group keys: arrows move and select.
+  el.addEventListener('keydown', (ev) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[ev.key];
+    if (!step) return;
+    ev.preventDefault();
+    const i = buttons.findIndex((b) => b.dataset.theme === choice);
+    const next = buttons[(i + step + buttons.length) % buttons.length];
+    pick(next.dataset.theme);
+    next.focus();
+  });
+  apply();
+  render();
+  return el;
+}
+
 // ---------- volume control ----------
 
-// Lucide volume-2 / volume-x, inline so the export stays offline.
+// Lucide volume-2 / volume-x.
 const SPEAKER = 'M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z';
-const speakerIcon = (extra) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${SPEAKER}"/>${extra}</svg>`;
+const speakerIcon = (extra) => svgIcon(18, `<path d="${SPEAKER}"/>${extra}`);
 const ICON_ON = speakerIcon('<path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>');
 const ICON_OFF = speakerIcon('<path d="M22 9l-6 6"/><path d="M16 9l6 6"/>');
 
-// The player's only volume control: a speaker button beside fullscreen that
+// The player's only volume control: a speaker button after fullscreen that
 // slides a slider out on hover or keyboard focus. Clicking the speaker mutes.
 function createVolumeControl(audioSync) {
   let muted = false;
@@ -370,8 +446,6 @@ function createTimeline({ t0, t1, spans, pauses, gaps, onSeek, onToggle }) {
 // ---------- speed menu ----------
 
 const SPEEDS = [0.5, 1, 1.25, 1.5, 2, 4, 8];
-// Lucide chevron-down / check, inline so the export stays offline.
-const lucide = (size, d) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${d}"/></svg>`;
 const ICON_CHEVRON = lucide(14, 'm6 9 6 6 6-6');
 const ICON_CHECK = lucide(16, 'M20 6 9 17l-5-5');
 
@@ -537,6 +611,7 @@ function renderFatal(root, message) {
 
 function mount() {
   injectStyles();
+  const themeSwitch = createThemeSwitch();
   const root = document.getElementById('testkit-app') || document.body.appendChild(h('div', { id: 'testkit-app' }));
   let data;
   try {
@@ -622,9 +697,7 @@ function mount() {
         metaItem('Commit', meta.commitSha ? h('code', {}, meta.commitSha) : 'unknown'),
         metaItem('Prototype', protoLink)),
       assetNotice),
-    h('div', { class: 'tk-actions' },
-      h('button', { type: 'button', class: 'tk-btn tk-btn--primary', onclick: copySummary }, 'Copy agent summary'),
-      h('button', { type: 'button', class: 'tk-btn', onclick: downloadJson }, 'Download raw JSON')));
+    themeSwitch);
 
   // ---- stage + timeline ----
   const stage = h('div', { class: 'tk-stage' });
@@ -662,8 +735,9 @@ function mount() {
   }
 
   const taskButtons = [];
+  const stageCol = h('div', { class: 'tk-stage-col' }, stage, replayable ? timelineCard : null);
   const pageMain = h('div', { class: 'tk-main' },
-    h('div', {}, stage, replayable ? timelineCard : null),
+    stageCol,
     h('aside', { class: 'tk-side' },
       h('section', { class: 'tk-tasks-card tk-card', 'aria-labelledby': 'tk-tasks-title' },
         h('h2', { class: 'tk-section-title', id: 'tk-tasks-title' }, 'Tasks'),
@@ -693,7 +767,7 @@ function mount() {
     h('span', { class: 'tk-task-head' }, h('span', {}, `Task ${span.n}`), h('span', {}, formatDuration(active))),
     h('span', { class: 'tk-task-prompt' }, span.prompt),
     badges.length ? h('span', { class: 'tk-badges' }, badges) : null);
-    btn.style.setProperty('--tk-band', `var(--tk-task-${i % BAND_COLORS})`);
+    btn.style.setProperty('--tk-band', `var(--lab-task-${(i % BAND_COLORS) + 1})`);
     taskButtons.push(btn);
     taskList.append(h('li', {}, btn));
   });
@@ -705,14 +779,19 @@ function mount() {
   if (!taskList.children.length) taskList.append(h('li', { class: 'tk-hint' }, 'No tasks were recorded in this session.'));
 
   // ---- summary ----
-  const summaryDetails = h('details', { class: 'tk-summary tk-card' },
+  const summaryDetails = h('details', {},
     h('summary', {}, 'Agent summary (Markdown)'),
     h('div', { class: 'tk-summary-body' },
       h('div', { class: 'tk-summary-actions' },
-        h('button', { type: 'button', class: 'tk-btn tk-btn--small', onclick: copySummary }, 'Copy')),
+        h('button', { type: 'button', class: 'tk-btn tk-btn--small', onclick: copySummary }, 'Copy agent summary')),
       h('pre', { class: 'tk-pre', tabindex: '0', 'aria-label': 'Agent summary markdown' }, summary)));
+  // The download sits over the summary row but outside <summary>, so clicking
+  // it doesn't toggle the details (and a button inside summary isn't valid).
+  stageCol.append(h('section', { class: 'tk-summary tk-card', 'aria-label': 'Agent summary' },
+    summaryDetails,
+    h('button', { type: 'button', class: 'tk-btn tk-summary-download', onclick: downloadJson }, 'Download raw JSON')));
 
-  root.replaceChildren(h('main', { class: 'tk-page' }, header, pageMain, summaryDetails), toast.el);
+  root.replaceChildren(h('main', { class: 'tk-page' }, header, pageMain), toast.el);
 
   if (!replayable) {
     stage.append(h('div', { class: 'tk-card tk-empty' },
@@ -744,13 +823,6 @@ function mount() {
         // hidden below in favor of the speed menu.
         speedOption: SPEEDS,
         speed: 1,
-        tags: {
-          'testkit:task-start': '#2563eb',
-          'testkit:task-end': '#4b5260',
-          'testkit:pause': '#6b7280',
-          'testkit:resume': '#6b7280',
-          'testkit:session-end': '#16181d',
-        },
       },
     });
   } catch (err) {
@@ -767,19 +839,20 @@ function mount() {
       h('h2', { class: 'tk-section-title', id: 'tk-timeline-title' }, 'Timeline'),
       clock),
     timeline.el,
-    h('p', { class: 'tk-hint', id: 'tk-timeline-hint' },
+    h('p', { class: 'tk-sr', id: 'tk-timeline-hint' },
       'Click or drag to seek. ', h('kbd', {}, '←'), ' ', h('kbd', {}, '→'), ' 5 s, ',
       h('kbd', {}, 'Shift'), ' or ', h('kbd', {}, 'Page Up/Down'), ' 30 s, ', h('kbd', {}, 'Home'), ' / ', h('kbd', {}, 'End'),
       ', ', h('kbd', {}, 'Space'), ' play/pause.'),
-    h('ul', { class: 'tk-legend', 'aria-label': 'Legend' },
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--task' }), 'Task'),
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--pause' }), `Paused (${pauses.length})`),
-      h('li', {}, h('span', { class: 'tk-swatch tk-swatch--gap' }), `Audio gap (${gaps.length})`)),
-    h('div', { class: 'tk-audio' },
-      h('span', { class: 'tk-audio-label' }, 'Audio'),
-      audioStatus,
-      audio.length ? enableBtn : null,
-      pauses.length ? h('label', { class: 'tk-check' }, skipBox, 'Skip paused time') : null));
+    h('div', { class: 'tk-timeline-foot' },
+      h('ul', { class: 'tk-legend', 'aria-label': 'Legend' },
+        h('li', {}, h('span', { class: 'tk-swatch tk-swatch--task' }), 'Task'),
+        h('li', {}, h('span', { class: 'tk-swatch tk-swatch--pause' }), `Paused (${pauses.length})`),
+        h('li', {}, h('span', { class: 'tk-swatch tk-swatch--gap' }), `Audio gap (${gaps.length})`)),
+      h('div', { class: 'tk-audio' },
+        h('span', { class: 'tk-sr' }, 'Audio: '),
+        audioStatus,
+        audio.length ? enableBtn : null,
+        pauses.length ? h('label', { class: 'tk-check' }, skipBox, 'Skip paused time') : null)));
 
   if (audio.length) {
     audioSync = createAudioSync(audio, {
@@ -810,7 +883,7 @@ function mount() {
   const playButton = controlButtons[0];
   const fullscreenButton = controlButtons[controlButtons.length - 1];
   fullscreenButton?.setAttribute('aria-label', 'Toggle fullscreen');
-  if (audioSync && fullscreenButton) fullscreenButton.before(createVolumeControl(audioSync));
+  if (audioSync && fullscreenButton) fullscreenButton.after(createVolumeControl(audioSync));
   playButton?.setAttribute('aria-label', 'Play');
   stage.querySelector('.rr-controller input[type="checkbox"]')?.setAttribute('aria-label', 'Skip inactive periods');
   const isSkipping = () => replayer?.speedService?.state?.value === 'skipping';
@@ -832,7 +905,7 @@ function mount() {
     const taskText = idx >= 0 ? `, ${spans[idx].label}` : '';
     const elapsed = formatDuration(offset);
     const totalText = formatDuration(t1 - t0);
-    clock.replaceChildren(h('strong', {}, elapsed), ` / ${totalText}${idx >= 0 ? ` · Task ${spans[idx].n}` : ''}`);
+    clock.replaceChildren(h('strong', {}, elapsed), ` / ${totalText}`);
     timeline.update(offset, `${elapsed} of ${totalText}${taskText}`, idx);
 
     if (playing && skipPauses) {

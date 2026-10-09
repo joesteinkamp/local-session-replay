@@ -31,7 +31,10 @@ in the same edit and say so in your report.
 - **One time base:** every timestamp is wall-clock `Date.now()` milliseconds —
   the same clock rrweb stamps events with.
 - Bundled by esbuild (`scripts/build.mjs`). Import packages by name (`rrweb`,
-  `rrweb-player`). Do not add dependencies without saying so.
+  `rrweb-player`). Do not add dependencies without saying so. The player's
+  fonts (`@fontsource-variable/inter-tight`, `@fontsource-variable/geist-mono`,
+  OFL) are dev dependencies inlined as base64 woff2 (`.woff2` loader), since
+  the export's CSP only allows `data:` fonts.
 
 ## Layout & ownership
 
@@ -477,7 +480,10 @@ The player bundle (`src/player/player.js`) runs inside the exported file: reads
 `#testkit-data`, mounts rrweb-player (`skipInactive: false` when audio exists),
 renders task markers on a timeline, syncs `<audio>` to the replayer (seek,
 play/pause, speed; paused above 4×), marks audio gaps, and offers "Download raw
-JSON" and "Copy agent summary". It exposes `window.TestKitPlayer = { player,
+JSON" (on the agent summary bar) and "Copy agent summary" (inside it). Its
+look is `ui.pen` › P2: `--lab-*` color tokens with light and dark values, picked
+by a Light / Dark / System switch (stored in `localStorage` as
+`testkit:replay-theme`; System follows `prefers-color-scheme`). It exposes `window.TestKitPlayer = { player,
 data, seekToWall, getOffset }` for automated checks.
 
 ## Build
