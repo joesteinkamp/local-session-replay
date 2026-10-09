@@ -473,10 +473,111 @@ kbd {
 
 .tk-audio-status.is-warn { color: var(--tk-warn); }
 
-.tk-volume {
-  width: 120px;
-  accent-color: var(--tk-accent);
+/* Playback controls on the left, volume + fullscreen on the right, so the
+   volume slider grows into empty space instead of re-centering the row.
+   Width matches .rr-timeline; the padding lines up with its time labels. */
+.tk-stage .rr-controller__btns {
+  width: 80%;
+  padding: 0 24px;
+  justify-content: flex-start;
 }
+
+.tk-stage .rr-controller__btns > button:last-child,
+.tk-stage .rr-controller__btns > .tk-volume { margin-left: auto; }
+.tk-stage .rr-controller__btns > .tk-volume + button { margin-left: 4px; }
+
+/* Volume lives in rrweb-player's button bar, beside fullscreen. Collapsed to
+   the speaker until hover or keyboard focus slides the slider out. */
+.tk-volume {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  border-radius: 16px;
+  transition: background-color 160ms var(--tk-ease);
+}
+
+/* rrweb-player's button styles are Svelte-scoped, so mirror them. */
+.tk-volume-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--tk-text);
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.tk-volume-slider {
+  --tk-level: 100%;
+  width: 0;
+  min-width: 0;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: width 160ms var(--tk-ease), margin 160ms var(--tk-ease), opacity 120ms var(--tk-ease);
+}
+
+.tk-volume:hover,
+.tk-volume:focus-within { background: var(--tk-bg-control); }
+
+.tk-volume:hover .tk-volume-slider,
+.tk-volume:focus-within .tk-volume-slider {
+  width: 72px;
+  margin: 0 12px 0 2px;
+  opacity: 1;
+}
+
+/* No hover on touch screens, so keep the slider out. */
+@media (hover: none) {
+  .tk-volume-slider { width: 72px; margin: 0 12px 0 2px; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tk-volume, .tk-volume-slider { transition: none; }
+}
+
+.tk-volume-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--tk-accent) var(--tk-level), var(--tk-border-strong) var(--tk-level));
+}
+
+.tk-volume-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--tk-accent) var(--tk-level), var(--tk-border-strong) var(--tk-level));
+}
+
+.tk-volume-slider::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--tk-accent);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.tk-volume-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--tk-accent);
+}
+
+.tk-volume-btn[aria-pressed='true'] ~ .tk-volume-slider::-webkit-slider-thumb { background: var(--tk-text-muted); }
+.tk-volume-btn[aria-pressed='true'] ~ .tk-volume-slider::-moz-range-thumb { background: var(--tk-text-muted); }
 
 .tk-check {
   display: inline-flex;
