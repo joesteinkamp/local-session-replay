@@ -1,5 +1,12 @@
 # Change Log
 
+## Fullscreen fills the screen and scales the replay to fit (2026-10-09, Claude)
+
+- **What:** in fullscreen the replay player fills the screen, with controls along the bottom and the recording scaled up to fit (`maxScale` lifted while fullscreen, 1x otherwise). Exiting restores the inline size. Fullscreen drops the card radius and shadow and letterboxes on the page tone. `testkit-plan.md` → *Later* gains "Fullscreen at original resolution".
+- **Ask:** fullscreen showed a small replay in the top-left with blank space below. Then: scale recordings up to fill fullscreen now, and plan an opt-in 1:1 mode.
+- **Why this approach:** rrweb-player fullscreens its own box, but our stage `ResizeObserver` and window resize handler re-sized it from the stage column straight after. `size()` now reads the fullscreen box, and a resize after `fullscreenchange` lands after rrweb-player's own handler, which restores stale dimensions on exit.
+- **Rejected:** fullscreening our whole stage column with our own handler (more code, same result); 1:1 as the only fullscreen behavior (half-empty screens for small recordings; now a planned opt-in mode instead).
+
 ## Happy-path overlay in hi-vis yellow (2026-10-09, Claude)
 
 - **What:** the overlay is now three views. A setup card (Agree and start / Screen only) replaces pre-flight. While recording, a bar (REC, 1/3, Next/Finish, Stop) sits in place of the bubble, with the task on a card beside it. A finish card (Download session / Discard) replaces the stopped panel. Everything is safety yellow with black type. Pause, Mute, Skip task, the consent checkbox, the mic level check, follow-up questions, success hints, mic-recovery notices, stop and new-session confirms, and the elapsed clock are gone from the UI. `ui.pen` carries the designs (01, 01b, 07).
