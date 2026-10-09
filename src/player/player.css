@@ -305,6 +305,11 @@ a:hover { text-decoration: underline; }
 
 #testkit-app .rr-player__frame { border-radius: var(--tk-radius) var(--tk-radius) 0 0; background: #fff; }
 
+/* Fullscreen: edge to edge, the replay letterboxed on the page tone. */
+#testkit-app .rr-player:fullscreen { border-radius: 0; box-shadow: none; }
+#testkit-app .rr-player:fullscreen .rr-player__frame { border-radius: 0; background: var(--lab-bg); }
+#testkit-app .rr-player:fullscreen .rr-controller { border-radius: 0; }
+
 #testkit-app .rr-controller {
   justify-content: center;
   gap: 10px;

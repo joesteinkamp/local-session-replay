@@ -135,6 +135,7 @@ TestKit.init({
 - In-session flagging ("this is confusing") on an element, borrowing Agentation's annotate interaction.
 - A React controller hook (`useTestKit()`), if apps need to drive session UI or flow themselves. The `<TestKit />` component itself shipped in Phase 6.
 - Optional drop into a shared Drive folder. The file format stays unchanged.
+- **Fullscreen at original resolution.** Fullscreen now scales the replay to fill the screen (`maxScale: 0` while fullscreen). Add a second mode that goes fullscreen but keeps the recording at 1:1 pixels, letterboxed on the page tone, for checking pixel-level detail when a recording is smaller than the viewer's screen. Likely shape: a fit/actual-size toggle in the controller (or a modifier on the fullscreen button), wired through the player's `size()` so it sets `maxScale` to `1` instead of `0`. Remember the choice for the rest of the session.
 
 ## Known limitations
 
